@@ -26,7 +26,15 @@ por dentro, es idempotente y se revierte con `git checkout -- ui-tui`.
 ## Instalar
 
 Requisitos: Hermes Agent con el TUI construido una vez (`hermes --tui`) y `python3`. Nada más: la
-lógica es Python de biblioteca estándar, sin dependencias.
+lógica es Python de biblioteca estándar, sin dependencias. Probado en Hermes `2026.9.24` (Linux).
+
+Solo el plugin (`/peek`), en un comando:
+
+```bash
+hermes plugins install riverosmejia/better-peek --enable
+```
+
+Y si quieres también el widget del TUI y los parches, desde el repo:
 
 ```bash
 git clone git@github.com:riverosmejia/better-peek.git
