@@ -3,6 +3,8 @@
 The paths Hermes names in an answer stop being text: `/peek` lists them and shows the file, a widget browses them, and —with the optional patch— the pointer highlights them and a click opens the file inside the TUI.
 Las rutas que Hermes nombra en una respuesta dejan de ser texto: `/peek` las lista y muestra el fichero, un widget las navega, y —con el parche opcional— el ratón las resalta y el clic abre el fichero dentro del propio TUI.
 
+![Peek: el fichero que nombra la respuesta, abierto en el TUI con la línea marcada](docs/demo.png)
+
 ```
   El bug esta en src/app.ts:42 y en el lockfile     <- raton: tarjeta con las lineas
                                                        clic: el fichero en el TUI
