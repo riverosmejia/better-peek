@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "better-peek",
+  "version": "0.1.0",
+  "description": "The paths an answer names become real: /peek lists them and shows a file's lines, the TUI widget browses them, and clicking one opens the file inside the TUI.",
+  "author": {
+    "name": "riverosmejia",
+    "url": "https://github.com/riverosmejia"
+  },
+  "homepage": "https://github.com/riverosmejia/better-peek",
+  "repository": "https://github.com/riverosmejia/better-peek",
+  "license": "MIT",
+  "keywords": ["hermes-agent", "tui", "paths", "preview", "terminal"]
+}

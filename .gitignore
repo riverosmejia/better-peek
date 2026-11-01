@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.wrangler/
+
+# Python ports under hermes/
+__pycache__/
+*.pyc

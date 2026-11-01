@@ -1,0 +1,1110 @@
+Rutas enlazadas en el transcript, con tarjeta al pasar el ratón y clic al visor.
+Se aplica sobre ~/.hermes/hermes-agent (ver apply.sh). Toca solo ui-tui:
+- lib/paths.ts y lib/pathHover.ts y lib/pathPeek.ts y lib/pathPreview.ts y lib/openLocalPath.ts (nuevos)
+- components/pathCard.tsx (nuevo), components/markdown.tsx, components/appLayout.tsx, entry.tsx
+- packages/hermes-ink: la opción onHyperlinkHover
+- app/useMainApp.ts: el clic abre el fichero en el visor
+- __tests__/pathLinks.test.ts
+
+diff --git a/ui-tui/packages/hermes-ink/src/ink/ink.tsx b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
+index a574c080792..f1c0a319885 100644
+--- a/ui-tui/packages/hermes-ink/src/ink/ink.tsx
++++ b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
+@@ -170,6 +170,14 @@ export type Options = {
+    * (Cmd+click is consumed by the TUI, not Terminal.app).
+    */
+   onHyperlinkClick?: (url: string) => void
++
++  /**
++   * Called when the OSC 8 link under the pointer changes (undefined = no link).
++   * The renderer already tracks this to invert the link's cells; this is the
++   * same signal, for an app that wants to answer the hover with something more
++   * than an affordance (a card with the file the path names, say).
++   */
++  onHyperlinkHover?: (url: string | undefined) => void
+ }
+ export default class Ink {
+   private readonly log: LogUpdate
+@@ -340,6 +348,7 @@ export default class Ink {
+     // nothing. The field stays writable so tests / debug overlays can
+     // still rebind it after construction.
+     this.onHyperlinkClick = options.onHyperlinkClick
++    this.onHyperlinkHover = options.onHyperlinkHover
+ 
+     this.terminal = {
+       stdout: options.stdout,
+@@ -2054,6 +2063,7 @@ export default class Ink {
+ 
+     if (next !== this.hoveredHyperlink) {
+       this.hoveredHyperlink = next
++      this.onHyperlinkHover?.(next)
+       this.scheduleRender()
+     }
+   }
+@@ -2110,6 +2120,9 @@ export default class Ink {
+    */
+   onHyperlinkClick: ((url: string) => void) | undefined
+ 
++  /** Stable wrapper for onHyperlinkHover: fired when the hovered link changes. */
++  onHyperlinkHover: ((url: string | undefined) => void) | undefined
++
+   /**
+    * Stable prototype wrapper for onHyperlinkClick. Passed to <App> as
+    * onOpenHyperlink so the prop is a bound method (autoBind'd) that reads
+diff --git a/ui-tui/packages/hermes-ink/src/ink/root.ts b/ui-tui/packages/hermes-ink/src/ink/root.ts
+index 41d02d52a0d..9702037b55c 100644
+--- a/ui-tui/packages/hermes-ink/src/ink/root.ts
++++ b/ui-tui/packages/hermes-ink/src/ink/root.ts
+@@ -60,6 +60,9 @@ export type RenderOptions = {
+    * click in any terminal where mouse tracking is on.
+    */
+   onHyperlinkClick?: (url: string) => void
++
++  /** Called when the link under the pointer changes (undefined = left it). */
++  onHyperlinkHover?: (url: string | undefined) => void
+ }
+ 
+ export type Instance = {
+@@ -155,7 +158,8 @@ export async function createRoot({
+   exitOnCtrlC = true,
+   patchConsole = true,
+   onFrame,
+-  onHyperlinkClick
++  onHyperlinkClick,
++  onHyperlinkHover
+ }: RenderOptions = {}): Promise<Root> {
+   // See wrappedRender — preserve microtask boundary from the old WASM await.
+   await Promise.resolve()
+@@ -167,7 +171,8 @@ export async function createRoot({
+     exitOnCtrlC,
+     patchConsole,
+     onFrame,
+-    onHyperlinkClick
++    onHyperlinkClick,
++    onHyperlinkHover
+   })
+ 
+   // Register in the instances map so that code that looks up the Ink
+diff --git a/ui-tui/src/__tests__/pathLinks.test.ts b/ui-tui/src/__tests__/pathLinks.test.ts
+new file mode 100644
+index 00000000000..638d824e803
+--- /dev/null
++++ b/ui-tui/src/__tests__/pathLinks.test.ts
+@@ -0,0 +1,203 @@
++import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { describe, expect, it } from 'vitest'
++
++import { localUrl, openExternalUrl, parseSafeUrl } from '../lib/openExternalUrl.js'
++import { openWithUserCommand } from '../lib/openLocalPath.js'
++import { $pathHover, setHoveredLink } from '../lib/pathHover.js'
++import { $pathPeek, clearPathPeek } from '../lib/pathPeek.js'
++import { pathPreview } from '../lib/pathPreview.js'
++import { codeSpanPath, existingPaths, fileUrl, lineOf, localPathOf, pathOfSpan, pathsIn, resolvePath } from '../lib/paths.js'
++
++const found = (text: string) => pathsIn(text).map(f => [text.slice(f.start, f.end), f.target])
++
++// The cases the original ships (plugins/quick-peek/hooks/register.test.tsx:70-84) are the contract
++// of this port; the rest covers what the TUI adds on top: which paths lead somewhere, and what a
++// click on one does.
++describe('pathsIn', () => {
++  it('finds absolute, home, relative and bare paths, and cuts what a sentence adds', () => {
++    expect(found('Lo dejé en /Users/ana/x.mp4. Y en ~/notas.md, ¿vale?')).toEqual([
++      ['/Users/ana/x.mp4', '/Users/ana/x.mp4'],
++      ['~/notas.md', '~/notas.md']
++    ])
++    expect(found('Mira src/app.ts:42 y README.md (la raíz).')).toEqual([
++      ['src/app.ts:42', 'src/app.ts'],
++      ['README.md', 'README.md']
++    ])
++    expect(found('see https://example.com/a/b.html and/or 1/2')).toEqual([
++      ['and/or', 'and/or'],
++      ['1/2', '1/2']
++    ])
++    expect(found('a word, then this')).toEqual([])
++  })
++
++  it('reads a span whole, with spaces, and the line after a path', () => {
++    expect(pathOfSpan('~/My Videos/a b.mp4')).toBe('~/My Videos/a b.mp4')
++    expect(pathOfSpan('npm run build')).toBeUndefined()
++    expect(lineOf('src/app.ts:42')).toBe(42)
++    expect(lineOf('src/app.ts:42:7.')).toBe(42)
++    expect(lineOf('src/app.ts')).toBeUndefined()
++  })
++
++  it('folds dots and expands home', () => {
++    expect(resolvePath('../b/./c.txt', '/project/app', '/Users/ana')).toBe('/project/b/c.txt')
++    expect(resolvePath('~/x', '/project/app', '/Users/ana')).toBe('/Users/ana/x')
++    expect(resolvePath('~/x', '/project/app', undefined)).toBeUndefined()
++  })
++})
++
++describe('existingPaths', () => {
++  const root = mkdtempSync(join(tmpdir(), 'peek-'))
++  const app = join(root, 'app')
++  const home = join(root, 'home')
++
++  mkdirSync(join(app, 'src'), { recursive: true })
++  mkdirSync(join(home, 'My Videos'), { recursive: true })
++  writeFileSync(join(app, 'README.md'), '# hola\n')
++  writeFileSync(join(app, 'src', 'app.ts'), 'const a = 1\n')
++  writeFileSync(join(home, 'My Videos', 'a b.mp4'), 'x')
++
++  it('keeps only what exists, in order, deduplicated, with its line', () => {
++    const text = `mira ${app}/README.md y src/app.ts:1 y otra vez ${app}/README.md, y nada.mp4`
++    expect(existingPaths(text, app, home).map(hit => [hit.path, hit.line])).toEqual([
++      [`${app}/README.md`, undefined],
++      [`${app}/src/app.ts`, 1]
++    ])
++  })
++
++  it('resolves a relative path from the folder it is given', () => {
++    // From `src`, `src/app.ts` would be `src/src/app.ts`, which is not there; from the app it is.
++    expect(existingPaths('en src/app.ts', join(app, 'src'), home)).toEqual([])
++    expect(existingPaths('en src/app.ts', app, home).map(hit => hit.path)).toEqual([`${app}/src/app.ts`])
++  })
++
++  it('reads a span that holds a space', () => {
++    const hits = existingPaths('en `~/My Videos/a b.mp4` esta', app, home)
++    expect(hits.map(hit => [hit.label, hit.path])).toEqual([['~/My Videos/a b.mp4', join(home, 'My Videos', 'a b.mp4')]])
++  })
++
++  it('links a whole code span that is a path, which is how answers name files', () => {
++    // The write-up shape: `path` between backticks, not prose.
++    expect(codeSpanPath(`${app}/README.md`, app, home)).toMatchObject({ path: `${app}/README.md` })
++    expect(codeSpanPath('src/app.ts:1', app, home)).toMatchObject({ path: `${app}/src/app.ts`, line: 1 })
++    // Anything that is not only a path stays plain code.
++    expect(codeSpanPath('npm run build', app, home)).toBeUndefined()
++    expect(codeSpanPath('/no/existe.ts', app, home)).toBeUndefined()
++  })
++
++  it('drops addresses and missing files, and stops at the limit', () => {
++    const text = 'https://example.com/a/b.html y /no/existe/x.ts y src/app.ts y README.md'
++    expect(existingPaths(text, app, home).map(hit => hit.label)).toEqual(['src/app.ts', 'README.md'])
++    expect(existingPaths(text, app, home, 1)).toHaveLength(1)
++  })
++})
++
++describe('file urls', () => {
++  it('round-trips a path with spaces and accents, and keeps the line', () => {
++    const path = '/home/ana/Mis Vídeos/a b.mp4'
++    const hit = localPathOf(new URL(fileUrl(path, 42)))
++    expect(hit.path).toBe(path)
++    expect(hit.line).toBe(42)
++  })
++})
++
++describe('localUrl', () => {
++  const root = mkdtempSync(join(tmpdir(), 'peek-url-'))
++  const file = join(root, 'x.ts')
++  writeFileSync(file, 'x\n')
++
++  it('accepts only an existing local file under its own scheme, and never an address', () => {
++    expect(localUrl(fileUrl(file, 3))).toEqual({ path: file, line: 3 })
++    expect(localUrl(fileUrl(join(root, 'no.ts')))).toBeNull()
++    expect(localUrl('https://example.com/x')).toBeNull()
++    expect(localUrl('javascript:alert(1)')).toBeNull()
++    // A `file://` the model wrote itself never reaches the local handler.
++    expect(localUrl('file:///etc/passwd')).toBeNull()
++    expect(parseSafeUrl('file:///etc/passwd')).toBeNull()
++  })
++})
++
++describe('a click on a path', () => {
++  const calls: { command: string; args: readonly string[] }[] = []
++
++  const fakeSpawn = ((command: string, args: readonly string[]) => {
++    calls.push({ command, args })
++
++    return { once: () => {}, unref: () => {}, stdin: { end: () => {} } }
++  }) as never
++
++  const root = mkdtempSync(join(tmpdir(), 'peek-click-'))
++  const file = join(root, 'click.ts')
++  writeFileSync(file, 'a\nb\nc\n')
++
++  it('asks the TUI to show the file when no opener is configured', () => {
++    clearPathPeek()
++    calls.length = 0
++    expect(openExternalUrl(fileUrl(file, 2), { spawn: fakeSpawn, platform: () => 'linux' })).toBe(true)
++    expect($pathPeek.get()).toEqual({ path: file, line: 2 })
++    expect(calls).toHaveLength(0)
++  })
++
++  it('runs the user template through sh, with the path quoted, when PEEK_OPEN is set', () => {
++    calls.length = 0
++    expect(openWithUserCommand("/a/it's here.ts", 7, { spawn: fakeSpawn, env: { PEEK_OPEN: 'nano {file} +{line}' } })).toBe(true)
++    expect(calls[0]?.command).toBe('/bin/sh')
++    expect(calls[0]?.args[1]).toBe("nano '/a/it'\\''s here.ts' +7")
++  })
++
++  it('does nothing at all for a URL the model wrote itself', () => {
++    clearPathPeek()
++    expect(openExternalUrl('file:///etc/passwd')).toBe(false)
++    expect($pathPeek.get()).toBeNull()
++  })
++})
++
++describe('a hovered path', () => {
++  it('becomes the state only for a link this app built', () => {
++    const root = mkdtempSync(join(tmpdir(), 'peek-hover-'))
++    const file = join(root, 'h.ts')
++    writeFileSync(file, 'x\n')
++
++    $pathHover.set(null)
++    setHoveredLink(fileUrl(file, 9))
++    expect($pathHover.get()).toEqual({ path: file, line: 9 })
++
++    // The same link, cell after cell, is not news.
++    setHoveredLink(fileUrl(file, 9))
++    expect($pathHover.get()).toEqual({ path: file, line: 9 })
++
++    // An address is not a file to preview, and leaving the link clears it.
++    setHoveredLink('https://example.com/x.ts')
++    expect($pathHover.get()).toBeNull()
++
++    setHoveredLink(fileUrl(file))
++    setHoveredLink(undefined)
++    expect($pathHover.get()).toBeNull()
++  })
++})
++
++describe('pathPreview', () => {
++  const root = mkdtempSync(join(tmpdir(), 'peek-preview-'))
++  const file = join(root, 'p.ts')
++
++  writeFileSync(file, 'one\ntwo\nthree\n\tfour\nfive\n')
++
++  it('numbers the lines and marks the one the path named', () => {
++    const text = pathPreview(file, 3)
++
++    expect(text.split('\n')[0]).toBe(`${file}:3  ·  5 lines`)
++    expect(text).toContain('▸    3  three')
++    expect(text).toContain('     4    four')
++  })
++
++  it('answers for a folder, a missing path and a binary', () => {
++    expect(pathPreview(root)).toContain('directory')
++    expect(pathPreview(join(root, 'nope.ts'))).toContain('cannot read it')
++
++    const binary = join(root, 'b.bin')
++    writeFileSync(binary, 'a\0b')
++    expect(pathPreview(binary)).toContain('binary')
++  })
++})
+diff --git a/ui-tui/src/app/useMainApp.ts b/ui-tui/src/app/useMainApp.ts
+index d287657e62a..851d06a2c96 100644
+--- a/ui-tui/src/app/useMainApp.ts
++++ b/ui-tui/src/app/useMainApp.ts
+@@ -37,6 +37,8 @@ import { t } from '../i18n/runtime.js'
+ import { useT } from '../i18n/useT.js'
+ import { composerPromptWidth } from '../lib/inputMetrics.js'
+ import { appendTranscriptMessage, capTranscriptHistory } from '../lib/messages.js'
++import { $pathPeek, clearPathPeek } from '../lib/pathPeek.js'
++import { pathPreview } from '../lib/pathPreview.js'
+ import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../lib/platform.js'
+ import { createResizeCoalescer } from '../lib/resizeCoalescer.js'
+ import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+@@ -596,6 +598,23 @@ export function useMainApp(gw: GatewayClient) {
+     []
+   )
+ 
++  // A click on a path in an answer is answered here. The terminal gives a click no
++  // pointer position to hang a card on and no clipboard that survives ssh, so the
++  // file opens in the same pager the /help panels use — the one answer that works
++  // everywhere and that tells the reader something happened.
++  useEffect(() => {
++    const unsubscribe = $pathPeek.listen(peek => {
++      if (!peek) {
++        return
++      }
++
++      page(pathPreview(peek.path, peek.line), peek.line === undefined ? peek.path : `${peek.path}:${peek.line}`)
++      clearPathPeek()
++    })
++
++    return unsubscribe
++  }, [page])
++
+   const panel = useCallback(
+     (title: string, sections: PanelSection[]) =>
+       appendMessage({ kind: 'panel', panelData: { sections, title }, role: 'system', text: '' }),
+diff --git a/ui-tui/src/components/appLayout.tsx b/ui-tui/src/components/appLayout.tsx
+index 1abd5838245..310e8df8061 100644
+--- a/ui-tui/src/components/appLayout.tsx
++++ b/ui-tui/src/components/appLayout.tsx
+@@ -38,6 +38,7 @@ import { HelpHint } from './helpHint.js'
+ import { Journey } from './journey.js'
+ import { LoopBar } from './loopBar.js'
+ import { MessageLine } from './messageLine.js'
++import { PathCard } from './pathCard.js'
+ import { PetKitty, PetSprite } from './petSprite.js'
+ import { QueuedMessages } from './queuedMessages.js'
+ import { LiveTodoPanel, StreamingAssistant } from './streamingAssistant.js'
+@@ -267,22 +268,28 @@ const TranscriptPane = memo(function TranscriptPane({
+ 
+   return (
+     <>
+-      {nativeMode ? (
+-        <Box flexDirection="column" flexGrow={1} onClick={clearBlankSelection}>
+-          {transcriptContent}
+-        </Box>
+-      ) : (
+-        <ScrollBox
+-          flexDirection="column"
+-          flexGrow={1}
+-          flexShrink={1}
+-          onClick={clearBlankSelection}
+-          ref={transcript.scrollRef}
+-          stickyScroll
+-        >
+-          {transcriptContent}
+-        </ScrollBox>
+-      )}
++      {/* The card a hovered path answers with sits over the transcript's corner,
++          so the wrapper is what it is positioned against. */}
++      <Box flexDirection="column" flexGrow={1} flexShrink={1}>
++        {nativeMode ? (
++          <Box flexDirection="column" flexGrow={1} onClick={clearBlankSelection}>
++            {transcriptContent}
++          </Box>
++        ) : (
++          <ScrollBox
++            flexDirection="column"
++            flexGrow={1}
++            flexShrink={1}
++            onClick={clearBlankSelection}
++            ref={transcript.scrollRef}
++            stickyScroll
++          >
++            {transcriptContent}
++          </ScrollBox>
++        )}
++
++        <PathCard cols={composer.cols} t={ui.theme} />
++      </Box>
+ 
+       {!nativeMode && (
+         <NoSelect flexShrink={0} marginLeft={1}>
+diff --git a/ui-tui/src/components/markdown.tsx b/ui-tui/src/components/markdown.tsx
+index 1912bca2511..a728193832c 100644
+--- a/ui-tui/src/components/markdown.tsx
++++ b/ui-tui/src/components/markdown.tsx
+@@ -4,6 +4,7 @@ import { Fragment, memo, type ReactNode, useMemo } from 'react'
+ import { ensureEmojiPresentation } from '../lib/emoji.js'
+ import { normalizeExternalUrl } from '../lib/externalLink.js'
+ import { BOX_CLOSE, BOX_OPEN, texToUnicode } from '../lib/mathUnicode.js'
++import { codeSpanPath, existingPaths, fileUrl } from '../lib/paths.js'
+ import { highlightLine, isHighlightable } from '../lib/syntax.js'
+ import type { Theme } from '../theme.js'
+ 
+@@ -178,6 +179,47 @@ const renderLink = (k: number, t: Theme, rawUrl: string, label?: string) => {
+   )
+ }
+ 
++// A path that leads somewhere, inside prose, becomes a link: OSC 8 for the
++// terminal that speaks it and the in-process click dispatcher for the ones that
++// don't, with the renderer's own hover highlight as the affordance — the text
++// reads exactly as the model wrote it. What a click does belongs to
++// `openExternalUrl` (copy `path:line`, or run the user's PEEK_OPEN).
++//
++// shortcut: relative paths resolve from the TUI process's folder, not from the
++// session's own after a `cd`; upgrade by reading the session cwd from the store
++// when someone hits it.
++const renderProse = (key: number, text: string): ReactNode => {
++  const hits = text ? existingPaths(text) : []
++
++  if (!hits.length) {
++    return <Text key={key}>{text}</Text>
++  }
++
++  const parts: ReactNode[] = []
++
++  let at = 0
++
++  for (const hit of hits) {
++    if (hit.start > at) {
++      parts.push(<Text key={`t${parts.length}`}>{text.slice(at, hit.start)}</Text>)
++    }
++
++    parts.push(
++      <Link key={`p${parts.length}`} url={fileUrl(hit.path, hit.line)}>
++        {hit.label}
++      </Link>
++    )
++
++    at = hit.end
++  }
++
++  if (at < text.length) {
++    parts.push(<Text key={`t${parts.length}`}>{text.slice(at)}</Text>)
++  }
++
++  return parts
++}
++
+ export const stripInlineMarkup = (v: string) =>
+   v
+     .replace(/!\[(.*?)\]\(((?:[^\s()]|\([^\s()]*\))+?)\)/g, '[image: $1] $2')
+@@ -546,7 +588,7 @@ function MdInline({ color, t, text }: { color?: string; t: Theme; text: string }
+     const k = parts.length
+ 
+     if (i > last) {
+-      parts.push(<Text key={k}>{text.slice(last, i)}</Text>)
++      parts.push(renderProse(k, text.slice(last, i)))
+     }
+ 
+     if (m[1] && m[2]) {
+@@ -569,9 +611,15 @@ function MdInline({ color, t, text }: { color?: string; t: Theme; text: string }
+       // Code is the one wrap that does NOT recurse — inline `code` spans
+       // are verbatim by definition. Letting MdInline reprocess them
+       // would corrupt regex examples and shell snippets.
++      //
++      // A span that is nothing but a path is still a link: answers name paths
++      // inside backticks more often than in prose, so this is the shape that
++      // matters most. The code styling stays exactly as it was.
++      const span = codeSpanPath(m[7])
++
+       parts.push(
+         <Text color={t.color.accent} dimColor key={parts.length}>
+-          {m[7]}
++          {span ? <Link url={fileUrl(span.path, span.line)}>{m[7]}</Link> : m[7]}
+         </Text>
+       )
+     } else if (m[8] ?? m[9]) {
+@@ -644,7 +692,7 @@ function MdInline({ color, t, text }: { color?: string; t: Theme; text: string }
+   }
+ 
+   if (last < text.length) {
+-    parts.push(<Text key={parts.length}>{text.slice(last)}</Text>)
++    parts.push(renderProse(parts.length, text.slice(last)))
+   }
+ 
+   return (
+diff --git a/ui-tui/src/components/pathCard.tsx b/ui-tui/src/components/pathCard.tsx
+new file mode 100644
+index 00000000000..b5fa8f94069
+--- /dev/null
++++ b/ui-tui/src/components/pathCard.tsx
+@@ -0,0 +1,61 @@
++import { NoSelect, Text } from '@hermes/ink'
++import { useStore } from '@nanostores/react'
++import { memo, useMemo } from 'react'
++
++import { $pathHover } from '../lib/pathHover.js'
++import { pathPreview } from '../lib/pathPreview.js'
++import type { Theme } from '../theme.js'
++
++/**
++ * The card a path answers a hover with: what the file is, and its lines, the one
++ * the path named marked — drawn in the terminal, in the corner of the transcript,
++ * never in a window of its own.
++ *
++ * It is fixed to the bottom-right of the transcript rather than following the
++ * pointer: ink's hover handlers get no coordinates (only clicks do), so a card
++ * that chased the cursor would need the event dispatcher itself changed. This one
++ * holds still, never covers the composer, and needs nothing from the terminal
++ * beyond the hover event itself.
++ */
++const WIDTH = 76
++const ROWS = 14
++
++export const PathCard = memo(function PathCard({ cols, t }: { cols: number; t: Theme }) {
++  const hover = useStore($pathHover)
++
++  const lines = useMemo(() => {
++    if (!hover) {
++      return []
++    }
++
++    const width = Math.max(20, Math.min(WIDTH, cols - 4))
++
++    return pathPreview(hover.path, hover.line, ROWS)
++      .split('\n')
++      .slice(0, ROWS + 1)
++      .map(line => (line.length > width - 2 ? `${line.slice(0, width - 3)}…` : line))
++  }, [cols, hover])
++
++  if (!hover || !lines.length) {
++    return null
++  }
++
++  return (
++    <NoSelect
++      borderColor={t.color.border}
++      borderStyle="round"
++      bottom={0}
++      flexDirection="column"
++      paddingX={1}
++      position="absolute"
++      right={0}
++      width={Math.max(20, Math.min(WIDTH, cols - 4))}
++    >
++      {lines.map((line, index) => (
++        <Text color={index === 0 ? t.color.accent : t.color.label} key={index} wrap="truncate-end">
++          {line}
++        </Text>
++      ))}
++    </NoSelect>
++  )
++})
+diff --git a/ui-tui/src/entry.tsx b/ui-tui/src/entry.tsx
+index 210889d72a4..ab87b3dad1d 100644
+--- a/ui-tui/src/entry.tsx
++++ b/ui-tui/src/entry.tsx
+@@ -14,6 +14,7 @@ import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.
+ import { type MemorySnapshot, startMemoryMonitor } from './lib/memoryMonitor.js'
+ import { openExternalUrl } from './lib/openExternalUrl.js'
+ import { recordParentLifecycle } from './lib/parentLog.js'
++import { setHoveredLink } from './lib/pathHover.js'
+ import { clearNativeTuiFrame, resetTerminalModes } from './lib/terminalModes.js'
+ 
+ if (!process.stdin.isTTY) {
+@@ -182,6 +183,7 @@ ink.render(<App gw={gw} />, {
+   // The TUI's mouse tracking captures click events before Terminal.app's
+   // own URL detection can fire, so without this hook clicks on `<Link>`
+   // do nothing in any terminal where mouseTracking is on.
++  onHyperlinkHover: url => setHoveredLink(url),
+   onHyperlinkClick: url => {
+     openExternalUrl(url)
+   }
+diff --git a/ui-tui/src/lib/openExternalUrl.ts b/ui-tui/src/lib/openExternalUrl.ts
+index 6c095a8d16f..b687f168d51 100644
+--- a/ui-tui/src/lib/openExternalUrl.ts
++++ b/ui-tui/src/lib/openExternalUrl.ts
+@@ -1,6 +1,10 @@
+ import { spawn, type SpawnOptions } from 'node:child_process'
+ import { platform } from 'node:os'
+ 
++import { openWithUserCommand } from './openLocalPath.js'
++import { requestPathPeek } from './pathPeek.js'
++import { isLocalFile, localPathOf, PEEK_SCHEME } from './paths.js'
++
+ /**
+  * Opens an external URL in the user's default browser/handler.
+  *
+@@ -12,7 +16,8 @@ import { platform } from 'node:os'
+  * ourselves.
+  *
+  * Safety:
+- * - http(s) only. Anything else (`file:`, `data:`, `javascript:`, etc.) is
++ * - http(s) only, plus `hermes-peek://` for a path this renderer resolved to a
++ *   real local file. Anything else (`file:`, `data:`, `javascript:`, etc.) is
+  *   rejected — a hostile model could otherwise emit `<Link url="file:///">`
+  *   and trick a click into running an arbitrary local handler.
+  * - Hostname is parsed via `URL`; only well-formed URLs are forwarded.
+@@ -31,6 +36,19 @@ import { platform } from 'node:os'
+  * pop.
+  */
+ export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies = {}): boolean {
++  // A path in an answer is a link of its own: clicking it shows the file in the
++  // TUI (or runs the user's PEEK_OPEN), never a browser handler. Only an existing
++  // local file qualifies — anything else falls through and is refused below.
++  const local = localUrl(rawUrl)
++
++  if (local) {
++    if (!openWithUserCommand(local.path, local.line)) {
++      requestPathPeek(local.path, local.line)
++    }
++
++    return true
++  }
++
+   const url = parseSafeUrl(rawUrl)
+ 
+   if (!url) {
+@@ -84,6 +102,25 @@ export type OpenDependencies = {
+   platform?: () => string
+ }
+ 
++/**
++ * The local file a `hermes-peek://` link names, when it is one that exists. That
++ * scheme is only ever produced by the markdown renderer for paths that resolved
++ * to a real file here, so a URL the model wrote itself cannot reach this.
++ */
++export function localUrl(value: string): { path: string; line?: number } | null {
++  if (!value || typeof value !== 'string' || !value.startsWith(PEEK_SCHEME)) {
++    return null
++  }
++
++  try {
++    const { path, line } = localPathOf(new URL(value))
++
++    return isLocalFile(path) ? { path, ...(line === undefined ? {} : { line }) } : null
++  } catch {
++    return null
++  }
++}
++
+ /**
+  * Validate and normalize a URL for opening externally.
+  * Exported for testing.
+diff --git a/ui-tui/src/lib/openLocalPath.ts b/ui-tui/src/lib/openLocalPath.ts
+new file mode 100644
+index 00000000000..9d497dbaa3a
+--- /dev/null
++++ b/ui-tui/src/lib/openLocalPath.ts
+@@ -0,0 +1,58 @@
++import { spawn, type SpawnOptions } from 'node:child_process'
++
++/**
++ * Runs the user's own opener for a clicked path, when they configured one.
++ *
++ * `PEEK_OPEN` is a command template, run through `/bin/sh -c`, with `{file}` and
++ * `{line}` substituted:
++ *
++ *   PEEK_OPEN='tmux new-window nano {file} +{line}'
++ *   PEEK_OPEN='code -g {file}:{line}'
++ *
++ * The path comes from the model's text, so it is single-quoted (with its own
++ * quotes escaped) before it reaches the template: it can never turn into a
++ * second command.
++ *
++ * Returns false when there is no template, or the spawn threw. The caller then
++ * shows the file inside the TUI — the answer that works with no display, no
++ * clipboard and no editor, and the only one that tells the reader something
++ * happened.
++ */
++export type LocalOpenDependencies = {
++  spawn?: typeof spawn
++  env?: NodeJS.ProcessEnv
++}
++
++export function openWithUserCommand(
++  path: string,
++  line: number | undefined,
++  dependencies: LocalOpenDependencies = {}
++): boolean {
++  const spawnFn = dependencies.spawn ?? spawn
++  const env = dependencies.env ?? process.env
++  const template = env.PEEK_OPEN?.trim()
++
++  if (!template) {
++    return false
++  }
++
++  const command = template.replaceAll('{file}', quoted(path)).replaceAll('{line}', String(line ?? 1))
++
++  try {
++    const child = spawnFn('/bin/sh', ['-c', command], {
++      detached: true,
++      stdio: 'ignore'
++    } satisfies SpawnOptions)
++
++    // A missing binary must not crash the TUI; the caller falls back to the pager.
++    child.once('error', () => {})
++    child.unref()
++
++    return true
++  } catch {
++    return false
++  }
++}
++
++/** One argument for the sh template: single quotes, its own quotes escaped. */
++const quoted = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+diff --git a/ui-tui/src/lib/pathHover.ts b/ui-tui/src/lib/pathHover.ts
+new file mode 100644
+index 00000000000..e8c71ceccf5
+--- /dev/null
++++ b/ui-tui/src/lib/pathHover.ts
+@@ -0,0 +1,39 @@
++import { atom } from 'nanostores'
++
++import { localPathOf, PEEK_SCHEME } from './paths.js'
++
++/**
++ * The path the pointer is on, if any.
++ *
++ * The renderer already knows this — it inverts a link's cells when the pointer
++ * is over it — and hands it over through `onHyperlinkHover` (wired in entry.tsx).
++ * Only links this app built (`hermes-peek://`) become a state here: an address
++ * the model wrote is not a file to preview.
++ */
++export type PathHoverState = { path: string; line?: number } | null
++
++export const $pathHover = atom<PathHoverState>(null)
++
++export function setHoveredLink(url: string | undefined): void {
++  if (!url || !url.startsWith(PEEK_SCHEME)) {
++    if ($pathHover.get() !== null) {
++      $pathHover.set(null)
++    }
++
++    return
++  }
++
++  try {
++    const { path, line } = localPathOf(new URL(url))
++    const current = $pathHover.get()
++
++    // Moving along one link fires on every cell: only a different file is news.
++    if (current?.path === path && current.line === line) {
++      return
++    }
++
++    $pathHover.set({ path, ...(line === undefined ? {} : { line }) })
++  } catch {
++    $pathHover.set(null)
++  }
++}
+diff --git a/ui-tui/src/lib/pathPeek.ts b/ui-tui/src/lib/pathPeek.ts
+new file mode 100644
+index 00000000000..da7fe146b81
+--- /dev/null
++++ b/ui-tui/src/lib/pathPeek.ts
+@@ -0,0 +1,21 @@
++import { atom } from 'nanostores'
++
++/**
++ * What a click on a path in an answer asked to see.
++ *
++ * The click cannot do anything the terminal can show by itself: there is no
++ * pointer position for a card, no clipboard that works over ssh, and handing the
++ * file to an editor would take the screen away mid-turn. So the click leaves a
++ * request here and the app answers it — the same pager the `/help` panels use.
++ */
++export type PathPeek = { path: string; line?: number }
++
++export const $pathPeek = atom<PathPeek | null>(null)
++
++export const requestPathPeek = (path: string, line?: number): void => {
++  $pathPeek.set({ path, ...(line === undefined ? {} : { line }) })
++}
++
++export const clearPathPeek = (): void => {
++  $pathPeek.set(null)
++}
+diff --git a/ui-tui/src/lib/pathPreview.ts b/ui-tui/src/lib/pathPreview.ts
+new file mode 100644
+index 00000000000..a01db53e696
+--- /dev/null
++++ b/ui-tui/src/lib/pathPreview.ts
+@@ -0,0 +1,58 @@
++import { readdirSync, readFileSync, statSync } from 'node:fs'
++
++/**
++ * The text a click on a path shows in the TUI's pager: what the file is, and its
++ * lines, numbered, with the one the path named marked.
++ *
++ * Everything that can go wrong (gone, unreadable, binary, enormous, a folder)
++ * comes back as a line that says so — a click always answers.
++ */
++
++const MAX_BYTES = 2 * 1024 * 1024
++const MAX_DIR_ENTRIES = 200
++const ROWS = 60
++const CONTEXT = 10
++
++export function pathPreview(path: string, line?: number, rows = ROWS): string {
++  try {
++    const stat = statSync(path)
++
++    if (stat.isDirectory()) {
++      const entries = readdirSync(path).sort()
++      const shown = entries.slice(0, MAX_DIR_ENTRIES).map(name => `  ${name}`)
++
++      return [`${path}/  ·  directory, ${entries.length} entries`, ...shown].join('\n')
++    }
++
++    if (stat.size > MAX_BYTES) {
++      return `${path}\n(too large to show: ${Math.round(stat.size / 1024)}k)`
++    }
++
++    const text = readFileSync(path, 'utf8')
++
++    if (text.slice(0, 4096).includes('\0')) {
++      return `${path}\n(binary file, ${Math.round(stat.size / 1024)}k)`
++    }
++
++    const all = text.split('\n')
++
++    // A file that ends in a newline gains an empty last line that is not one.
++    if (all.length > 1 && all.at(-1) === '') {
++      all.pop()
++    }
++
++    const mark = line !== undefined && line >= 1 && line <= all.length ? line : 0
++    const first = mark > 0 ? Math.max(1, mark - CONTEXT) : 1
++
++    const shown = all.slice(first - 1, first - 1 + rows).map((row, offset) => {
++      const number = first + offset
++      const flag = number === mark ? '▸' : ' '
++
++      return `${flag}${String(number).padStart(5)}  ${row.replaceAll('\t', '  ').trimEnd()}`
++    })
++
++    return [`${path}${mark > 0 ? `:${mark}` : ''}  ·  ${all.length} lines`, ...shown].join('\n')
++  } catch (error) {
++    return `${path}\n(cannot read it: ${(error as Error).message})`
++  }
++}
+diff --git a/ui-tui/src/lib/paths.ts b/ui-tui/src/lib/paths.ts
+new file mode 100644
+index 00000000000..caa1ddba663
+--- /dev/null
++++ b/ui-tui/src/lib/paths.ts
+@@ -0,0 +1,249 @@
++import { existsSync, statSync } from 'node:fs'
++import { homedir } from 'node:os'
++
++/**
++ * Finding the paths a text names, and which of them lead somewhere.
++ *
++ * Port of `hooks/paths.ts` from midudev's quick-peek (MIT) to the
++ * TUI, so a path in an answer can become a link instead of staying plain text.
++ * The rules are the original's: absolute, from home, relative, bare, each with
++ * an optional `:line` or `:line:col`; addresses are never paths.
++ */
++
++export type Found = { start: number; end: number; target: string }
++
++/** A path that leads somewhere: where it sits in the text, as written, resolved, and its line. */
++export type PathHit = { start: number; end: number; label: string; path: string; line?: number }
++
++// What a sentence puts after a path, and a line (and column) after a file.
++const TRAILING = /[.,;:!?)\]}>'"»”’]+$/
++const LINE = /:\d+(?::\d+)?$/
++// An address: never a path, nor the paths inside it.
++const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()]+/gi
++
++// Absolute, from home or explicitly relative; a relative path with a folder in
++// it; a file name with an extension. None starts inside a word, an address or
++// another path.
++const SOURCES = [
++  String.raw`(?:~|\.{1,2})?/[^\s\`'"<>()[\]{}|*]+`,
++  String.raw`[A-Za-z]:\\[^\s\`'"<>()[\]{}|*]+`,
++  String.raw`[\w@+-][\w@.+-]*(?:/[\w@.+-]+)+/?`,
++  String.raw`[\w@+-][\w@.+-]*\.[A-Za-z][A-Za-z0-9]{0,9}`
++]
++
++const CANDIDATE = new RegExp(SOURCES.map(src => String.raw`(?<![\w/.~:\\@-])(?:${src})(?::\d+(?::\d+)?)?`).join('|'), 'g')
++// A whole inline code span that is a path: it may hold spaces when it starts as
++// a path does.
++const SPAN = /^(?:(?:~|\.{1,2})?\/|[A-Za-z]:\\)[^\n`]*[^\s`]$/
++
++/** The line a path's text names after it (`src/x.ts:12`, `src/x.ts:12:5`), if any. */
++export function lineOf(text: string): number | undefined {
++  const line = text.trim().replace(TRAILING, '').match(LINE)?.[0]
++
++  return line === undefined ? undefined : Number(line.slice(1).split(':')[0])
++}
++
++function clean(text: string): string | undefined {
++  let target = text.replace(TRAILING, '')
++
++  target = target.replace(LINE, '')
++  target = target.replace(TRAILING, '')
++
++  return /[\w~]/.test(target) && target !== '~' ? target : undefined
++}
++
++/** The paths named in plain text, in order. */
++export function pathsIn(text: string): Found[] {
++  const masked = text.replace(URL_RE, match => ' '.repeat(match.length))
++  const found: Found[] = []
++
++  for (const match of masked.matchAll(CANDIDATE)) {
++    const whole = match[0]
++    const target = clean(whole)
++
++    if (target === undefined) {
++      continue
++    }
++
++    found.push({ start: match.index ?? 0, end: (match.index ?? 0) + whole.replace(TRAILING, '').length, target })
++  }
++
++  return found
++}
++
++/** The path an inline code span holds whole (`~/a b/c.mp4`), if it holds one. */
++export function pathOfSpan(code: string): string | undefined {
++  const text = code.trim()
++
++  if (SPAN.test(text)) {
++    return text.replace(LINE, '')
++  }
++
++  const found = pathsIn(text)
++
++  return found.length === 1 && found[0]!.start === 0 && found[0]!.end === text.length ? found[0]!.target : undefined
++}
++
++/** Where `target` lands: home for `~`, `cwd` for a relative path; `.`/`..` folded. */
++export function resolvePath(target: string, cwd: string, home: string | undefined): string | undefined {
++  if (/^[A-Za-z]:\\/.test(target)) {
++    return target
++  }
++
++  let path = target
++
++  if (path === '~' || path.startsWith('~/')) {
++    if (!home) {
++      return undefined
++    }
++
++    path = home + path.slice(1)
++  } else if (!path.startsWith('/')) {
++    path = `${cwd}/${path}`
++  }
++
++  const parts: string[] = []
++
++  for (const part of path.split('/')) {
++    if (part === '' || part === '.') {
++      continue
++    }
++
++    if (part === '..') {
++      parts.pop()
++    } else {
++      parts.push(part)
++    }
++  }
++
++  return `/${parts.join('/')}`
++}
++
++// A stat is not free and the same answer is asked every frame a message
++// re-renders: what exists is remembered longer than what is missing (a file
++// created a moment ago must show up soon).
++const FOUND_MS = 30_000
++const MISSING_MS = 3_000
++const stats = new Map<string, { at: number; there: boolean }>()
++
++function there(path: string): boolean {
++  const now = Date.now()
++  const known = stats.get(path)
++
++  if (known && now - known.at < (known.there ? FOUND_MS : MISSING_MS)) {
++    return known.there
++  }
++
++  let found = false
++
++  try {
++    found = statSync(path).isFile() || statSync(path).isDirectory()
++  } catch {
++    found = false
++  }
++
++  if (stats.size > 2000) {
++    stats.clear()
++  }
++
++  stats.set(path, { at: now, there: found })
++
++  return found
++}
++
++/**
++ * The paths of `text` that lead to a file or a folder, in the order they appear,
++ * deduplicated. A relative path leads from the folder the shell is in.
++ */
++export function existingPaths(text: string, cwd: string = process.cwd(), home = homedir(), limit = 20): PathHit[] {
++  // A path written as a whole code span may hold spaces (`~/My Videos/a b.mp4`), so the spans are
++  // read first and then the plain text; both together, in the order they appear.
++  const named: Found[] = []
++
++  for (const span of text.matchAll(/`([^\n`]+)`/g)) {
++    const code = span[1] ?? ''
++    const target = pathOfSpan(code)
++    const start = (span.index ?? 0) + 1
++
++    if (target !== undefined) {
++      named.push({ start, end: start + code.length, target })
++    }
++  }
++
++  named.push(...pathsIn(text))
++  named.sort((a, b) => a.start - b.start)
++
++  const hits: PathHit[] = []
++  const seen = new Set<string>()
++
++  for (const found of named) {
++    const path = resolvePath(found.target, cwd, home)
++
++    if (!path || seen.has(path) || !there(path)) {
++      continue
++    }
++
++    seen.add(path)
++
++    const line = lineOf(text.slice(found.start, found.end))
++
++    hits.push({
++      start: found.start,
++      end: found.end,
++      label: text.slice(found.start, found.end),
++      path,
++      ...(line === undefined ? {} : { line })
++    })
++
++    if (hits.length >= limit) {
++      break
++    }
++  }
++
++  return hits
++}
++
++/**
++ * The link a path in prose carries. A scheme of our own, so a `file://` a model
++ * writes in markdown keeps being refused by `parseSafeUrl` — only links this
++ * renderer built can reach the local-click handler.
++ */
++export const PEEK_SCHEME = 'hermes-peek:'
++
++export const fileUrl = (path: string, line?: number): string =>
++  `${PEEK_SCHEME}//${path.split('/').map(encodeURIComponent).join('/')}${line === undefined ? '' : `#L${line}`}`
++
++/** The local path a `file://` URL names, and the line its fragment holds. */
++export function localPathOf(url: URL): { path: string; line?: number } {
++  const path = decodeURIComponent(url.pathname)
++  const line = Number(url.hash.replace(/^#L/, ''))
++
++  return { path, ...(Number.isFinite(line) && line > 0 ? { line } : {}) }
++}
++
++/** Whether a path is something we are willing to hand to a click handler. */
++export const isLocalFile = (path: string): boolean =>
++  path.startsWith('/') && !path.includes('\0') && existsSync(path)
++
++/**
++ * The path a whole inline code span names, when it leads somewhere:
++ * `` `src/app.ts:42` ``, `` `~/My Videos/a b.mp4` ``. Answers are written mostly
++ * with paths inside backticks, so this is the shape that matters most.
++ */
++export function codeSpanPath(code: string, cwd: string = process.cwd(), home = homedir()): PathHit | undefined {
++  const target = pathOfSpan(code)
++
++  if (target === undefined) {
++    return undefined
++  }
++
++  const path = resolvePath(target, cwd, home)
++
++  if (!path || !there(path)) {
++    return undefined
++  }
++
++  const line = lineOf(code)
++
++  return { start: 0, end: code.length, label: code, path, ...(line === undefined ? {} : { line }) }
++}
+diff --git a/ui-tui/src/types/hermes-ink.d.ts b/ui-tui/src/types/hermes-ink.d.ts
+index 2510907a493..d402bbfe4a8 100644
+--- a/ui-tui/src/types/hermes-ink.d.ts
++++ b/ui-tui/src/types/hermes-ink.d.ts
+@@ -69,6 +69,7 @@ declare module '@hermes/ink' {
+     readonly patchConsole?: boolean
+     readonly onFrame?: (event: FrameEvent) => void
+     readonly onHyperlinkClick?: (url: string) => void
++    readonly onHyperlinkHover?: (url: string | undefined) => void
+   }
+ 
+   export type Instance = {
