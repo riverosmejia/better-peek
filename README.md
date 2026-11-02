@@ -1,13 +1,13 @@
 # better-peek
 
 The paths Hermes names in an answer stop being text: `/peek` lists them and shows the file, a widget browses them, and —with the optional patch— the pointer highlights them and a click opens the file inside the TUI.
-Las rutas que Hermes nombra en una respuesta dejan de ser texto: `/peek` las lista y muestra el fichero, un widget las navega, y —con el parche opcional— el ratón las resalta y el clic abre el fichero dentro del propio TUI.
+Las rutas que Hermes nombra en una respuesta dejan de ser texto: `/peek` las lista y muestra el fichero, un widget las navega, y —con el parche opcional— el ratón las resalta, una tarjeta enseña sus líneas y el clic lo abre en tu explorador de archivos.
 
 ![Peek: el fichero que nombra la respuesta, abierto en el TUI con la línea marcada](docs/demo.png)
 
 ```
   El bug esta en src/app.ts:42 y en el lockfile     <- raton: tarjeta con las lineas
-                                                       clic: el fichero en el TUI
+                                                       clic: en tu explorador de archivos
 ```
 
 > Adaptación a [Hermes Agent](https://hermes-agent.nousresearch.com) del plugin *quick-peek* de
@@ -20,7 +20,7 @@ Las rutas que Hermes nombra en una respuesta dejan de ser texto: `/peek` las lis
 |---|---|---|
 | **Plugin** — `/peek` | Lista las rutas de la última respuesta con su tamaño y edad. `/peek 2` o `/peek src/app.ts:42` abre una con las líneas numeradas y la que nombra marcada. Funciona en el CLI, en el TUI, por SSH y en el gateway, sin ratón. | No: es un plugin normal |
 | **Widget** — `/better-peek` | Modal del TUI con la lista: flechas para elegir, Enter para ver el fichero, `c` para copiar `ruta:línea`, Esc para cerrar. | No: un `.mjs` en `tui-widgets/` |
-| **Parche** — opcional | Las rutas del transcript como enlaces: resaltado al pasar el ratón, tarjeta con las líneas en la esquina, clic que abre el fichero en el visor del TUI. | Sí: un diff de `ui-tui` |
+| **Parche** — opcional | Las rutas del transcript como enlaces: resaltado al pasar el ratón, tarjeta junto al puntero con las líneas coloreadas, y clic que muestra el fichero en el explorador de archivos (con el fichero seleccionado). | Sí: un diff de `ui-tui` |
 
 El plugin y el widget se instalan y desinstalan sin rastro. El parche es lo único que modifica Hermes
 por dentro, es idempotente y se revierte con `git checkout -- ui-tui`.
@@ -67,8 +67,10 @@ rama).
 /better-peek              el modal del TUI (flechas, Enter, c para copiar, Esc)
 ```
 
-Con el parche, además, el ratón. Si prefieres que el clic abra un editor en vez del visor del TUI,
-dilo con `PEEK_OPEN`, que se ejecuta con `{file}` y `{line}` sustituidos y la ruta entrecomillada:
+Con el parche, además, el ratón. El clic sigue el orden: `PEEK_OPEN` si lo defines, si no el
+explorador de archivos (`org.freedesktop.FileManager1`; si no está, `xdg-open` en la carpeta), y sin
+pantalla —por ssh— el fichero en el visor del TUI, que es lo único que funciona ahí. `PEEK_OPEN` se
+ejecuta con `{file}` y `{line}` sustituidos y la ruta entrecomillada:
 
 ```bash
 PEEK_OPEN='tmux new-window nano {file} +{line}' hermes --tui
@@ -77,7 +79,7 @@ PEEK_OPEN='code -g {file}:{line}' hermes --tui
 
 El realce necesita el ratón del terminal (`display.mouse_tracking` en `all`, el valor por defecto) y
 no funciona en tmux con el modo `wheel`, que existe justamente para que el ratón no ensucie el prompt.
-Sin él, `/peek`, el clic y el widget siguen funcionando.
+Sin él, `/peek` y el widget siguen funcionando (el clic es lo único que necesita el parche).
 
 ## Qué NO hace
 
