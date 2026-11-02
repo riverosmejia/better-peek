@@ -80,10 +80,10 @@ index 41d02d52a0d..4e5883d3047 100644
    // Register in the instances map so that code that looks up the Ink
 diff --git a/ui-tui/src/__tests__/pathCard.test.tsx b/ui-tui/src/__tests__/pathCard.test.tsx
 new file mode 100644
-index 00000000000..cf2e469b898
+index 00000000000..bd472ddbb3c
 --- /dev/null
 +++ b/ui-tui/src/__tests__/pathCard.test.tsx
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,102 @@
 +import { writeFileSync } from 'fs'
 +import { PassThrough } from 'stream'
 +
@@ -163,6 +163,17 @@ index 00000000000..cf2e469b898
 +    expect(renderCard().frame.join('\n')).toContain('export const answer = 42')
 +    expect(bodyOf('/tmp/cardtest/sample.ts').lang).toBe('ts')
 +    expect(bodyOf('/tmp/cardtest/sample.txt').lang).toBe('')
++  })
++
++  it('lists a folder without pretending its names are line numbers', () => {
++    $pathHover.set({ path: `${process.cwd()}/src/lib`, row: 4, col: 10 })
++
++    const frame = renderCard().frame.join('\n')
++
++    expect(frame).toContain('directory,')
++    expect(frame).toContain('click: list the folder')
++    expect(frame).toContain('pathPreview.ts')
++    expect(frame).not.toMatch(/\s1 {2}pathPreview\.ts/)
 +  })
 +
 +  it('draws nothing when the pointer is not on a path', () => {
@@ -618,10 +629,10 @@ index 1912bca2511..a728193832c 100644
    return (
 diff --git a/ui-tui/src/components/pathCard.tsx b/ui-tui/src/components/pathCard.tsx
 new file mode 100644
-index 00000000000..27ed59b6c28
+index 00000000000..91a458d660b
 --- /dev/null
 +++ b/ui-tui/src/components/pathCard.tsx
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,88 @@
 +import { NoSelect, Text, useStdout } from '@hermes/ink'
 +import { useStore } from '@nanostores/react'
 +import { memo, useMemo } from 'react'
@@ -665,8 +676,10 @@ index 00000000000..27ed59b6c28
 +  const name = hover ? (hover.path.slice(hover.path.lastIndexOf('/') + 1) || hover.path) : ''
 +  const title = hover?.line === undefined ? name : `${name}:${hover?.line}`
 +
++  const action = body?.numbered === false ? 'click: list the folder' : 'click: open the file'
++
 +  const header = body
-+    ? body.note ?? `${title}${body.meta ? ` · ${body.meta}` : ''} · click: open the file`
++    ? body.note ?? `${title}${body.meta ? ` · ${body.meta}` : ''}${body.note ? '' : ` · ${action}`}`
 +    : ''
 +
 +  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, header.length + 4, cols - 4))
@@ -696,7 +709,7 @@ index 00000000000..27ed59b6c28
 +      {trunk.map(({ number, text, mark }) => (
 +        <Text key={number} wrap="truncate-end">
 +          <Text color={mark ? t.color.accent : t.color.muted}>
-+            {`${mark ? '▸' : ' '}${String(number).padStart(5)}  `}
++            {body.numbered ? `${mark ? '▸' : ' '}${String(number).padStart(5)}  ` : '  '}
 +          </Text>
 +          {highlightLine(text, body.lang, t).map(([color, token], index) => (
 +            <Text color={color || t.color.label} key={index}>
@@ -977,10 +990,10 @@ index 00000000000..da7fe146b81
 +}
 diff --git a/ui-tui/src/lib/pathPreview.ts b/ui-tui/src/lib/pathPreview.ts
 new file mode 100644
-index 00000000000..f04ceb1c90a
+index 00000000000..372270c76c2
 --- /dev/null
 +++ b/ui-tui/src/lib/pathPreview.ts
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,117 @@
 +import { readdirSync, readFileSync, statSync } from 'node:fs'
 +
 +/**
@@ -1013,6 +1026,8 @@ index 00000000000..f04ceb1c90a
 +  meta: string
 +  /** The lines to show. Empty when `note` explains why there is nothing. */
 +  lines: PreviewLine[]
++  /** Whether the lines are numbered (a file) or just names (a folder). */
++  numbered: boolean
 +  /** Why there is nothing to show, when there is nothing. */
 +  note?: string
 +  /** The language name `syntax.ts` takes, or '' for plain. */
@@ -1029,7 +1044,8 @@ index 00000000000..f04ceb1c90a
 +      return {
 +        title: `${path}/`,
 +        meta: `directory, ${entries.length} entries`,
-+        lines: entries.slice(0, MAX_DIR_ENTRIES).map((name, index) => ({ number: index + 1, text: name, mark: false })),
++        lines: entries.slice(0, MAX_DIR_ENTRIES).map(name => ({ number: 0, text: name, mark: false })),
++        numbered: false,
 +        lang: ''
 +      }
 +    }
@@ -1037,13 +1053,13 @@ index 00000000000..f04ceb1c90a
 +    const kb = Math.round(stat.size / 1024)
 +
 +    if (stat.size > MAX_BYTES) {
-+      return { title: path, meta: '', lines: [], note: `(too large to show: ${kb}k)`, lang: '' }
++      return { title: path, meta: '', lines: [], numbered: true, note: `(too large to show: ${kb}k)`, lang: '' }
 +    }
 +
 +    const text = readFileSync(path, 'utf8')
 +
 +    if (text.slice(0, 4096).includes('\0')) {
-+      return { title: path, meta: '', lines: [], note: `(binary file, ${kb}k)`, lang: '' }
++      return { title: path, meta: '', lines: [], numbered: true, note: `(binary file, ${kb}k)`, lang: '' }
 +    }
 +
 +    const all = text.split('\n')
@@ -1060,6 +1076,7 @@ index 00000000000..f04ceb1c90a
 +    return {
 +      title: `${path}${mark > 0 ? `:${mark}` : ''}`,
 +      meta: `${all.length} lines`,
++      numbered: true,
 +      lang: LANGS[extension] ?? '',
 +      lines: all.slice(first - 1, first - 1 + rows).map((row, offset) => {
 +        const number = first + offset
@@ -1068,7 +1085,14 @@ index 00000000000..f04ceb1c90a
 +      })
 +    }
 +  } catch (error) {
-+    return { title: path, meta: '', lines: [], note: `(cannot read it: ${(error as Error).message})`, lang: '' }
++    return {
++      title: path,
++      meta: '',
++      lines: [],
++      numbered: true,
++      note: `(cannot read it: ${(error as Error).message})`,
++      lang: ''
++    }
 +  }
 +}
 +
@@ -1082,7 +1106,9 @@ index 00000000000..f04ceb1c90a
 +
 +  return [
 +    `${body.title}  ·  ${body.meta}`,
-+    ...body.lines.map(({ number, text, mark }) => `${mark ? '▸' : ' '}${String(number).padStart(5)}  ${text}`)
++    ...body.lines.map(({ number, text, mark }) =>
++      body.numbered ? `${mark ? '▸' : ' '}${String(number).padStart(5)}  ${text}` : `  ${text}`
++    )
 +  ].join('\n')
 +}
 diff --git a/ui-tui/src/lib/paths.ts b/ui-tui/src/lib/paths.ts
