@@ -1,6 +1,6 @@
 name: better-peek
 kind: standalone
-version: "0.1.0"
+version: "0.2.0"
 description: "Preview the paths an answer names: /peek lists them and shows a file's lines, with the one a path names marked. Port of midudev's quick-peek (MIT) to Hermes' terminal surfaces."
 author: riverosmejia
 license: MIT
