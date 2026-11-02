@@ -1,11 +1,49 @@
+diff --git a/ui-tui/packages/hermes-ink/src/ink/components/App.tsx b/ui-tui/packages/hermes-ink/src/ink/components/App.tsx
+index 3781b3998a8..856d1770dab 100644
+--- a/ui-tui/packages/hermes-ink/src/ink/components/App.tsx
++++ b/ui-tui/packages/hermes-ink/src/ink/components/App.tsx
+@@ -110,7 +110,7 @@ type Props = {
+   // MULTI_CLICK_TIMEOUT_MS so double-click can cancel it.
+   readonly getHyperlinkAt: (col: number, row: number) => string | undefined
+   // Open a hyperlink URL in the browser. Called after the timer fires.
+-  readonly onOpenHyperlink: (url: string) => void
++  readonly onOpenHyperlink: (url: string, modifiers?: { alt: boolean }) => void
+   // Called on double/triple-click PRESS at (col, row). count=2 selects
+   // the word under the cursor; count=3 selects the line. Ink reads the
+   // screen buffer to find word/line boundaries and mutates selection,
+@@ -1039,14 +1039,19 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
+           clearTimeout(app.pendingHyperlinkTimer)
+         }
+ 
++        // The modifier is read now: by the time the timer fires, the press it belongs
++        // to is long gone.
++        const alt = sel.lastPressHadAlt === true
++
+         app.pendingHyperlinkTimer = setTimeout(
+-          (app, url) => {
++          (app, url, alt) => {
+             app.pendingHyperlinkTimer = null
+-            app.props.onOpenHyperlink(url)
++            app.props.onOpenHyperlink(url, { alt })
+           },
+           MULTI_CLICK_TIMEOUT_MS,
+           app,
+-          url
++          url,
++          alt
+         )
+       }
+     }
 diff --git a/ui-tui/packages/hermes-ink/src/ink/ink.tsx b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
-index a574c080792..0404f650432 100644
+index a574c080792..9bb7a5340ff 100644
 --- a/ui-tui/packages/hermes-ink/src/ink/ink.tsx
 +++ b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
-@@ -170,6 +170,14 @@ export type Options = {
+@@ -169,7 +169,15 @@ export type Options = {
+    * nothing on click in any terminal where mouse tracking is on
     * (Cmd+click is consumed by the TUI, not Terminal.app).
     */
-   onHyperlinkClick?: (url: string) => void
+-  onHyperlinkClick?: (url: string) => void
++  onHyperlinkClick?: (url: string, modifiers?: { alt: boolean }) => void
 +
 +  /**
 +   * Called when the OSC 8 link under the pointer changes (undefined = no link).
@@ -33,24 +71,39 @@ index a574c080792..0404f650432 100644
        this.scheduleRender()
      }
    }
-@@ -2110,6 +2120,9 @@ export default class Ink {
+@@ -2108,15 +2118,18 @@ export default class Ink {
+    * the `onHyperlinkClick` Render/Ink option, or directly on the instance
+    * for late-bound test scenarios.
     */
-   onHyperlinkClick: ((url: string) => void) | undefined
- 
+-  onHyperlinkClick: ((url: string) => void) | undefined
++  onHyperlinkClick: ((url: string, modifiers?: { alt: boolean }) => void) | undefined
++
 +  /** Stable wrapper for onHyperlinkHover: fired when the hovered link changes. */
 +  onHyperlinkHover: ((url: string | undefined, position?: { col: number; row: number }) => void) | undefined
-+
+ 
    /**
     * Stable prototype wrapper for onHyperlinkClick. Passed to <App> as
     * onOpenHyperlink so the prop is a bound method (autoBind'd) that reads
+    * the mutable field at call time — not the undefined-at-render value.
+    */
+-  openHyperlink(url: string): void {
+-    this.onHyperlinkClick?.(url)
++  openHyperlink(url: string, modifiers?: { alt: boolean }): void {
++    this.onHyperlinkClick?.(url, modifiers)
+   }
+ 
+   /**
 diff --git a/ui-tui/packages/hermes-ink/src/ink/root.ts b/ui-tui/packages/hermes-ink/src/ink/root.ts
-index 41d02d52a0d..4e5883d3047 100644
+index 41d02d52a0d..274ac01e319 100644
 --- a/ui-tui/packages/hermes-ink/src/ink/root.ts
 +++ b/ui-tui/packages/hermes-ink/src/ink/root.ts
-@@ -60,6 +60,10 @@ export type RenderOptions = {
+@@ -59,7 +59,12 @@ export type RenderOptions = {
+    * don't pass it will see clickable underline styling but no action on
     * click in any terminal where mouse tracking is on.
     */
-   onHyperlinkClick?: (url: string) => void
+-  onHyperlinkClick?: (url: string) => void
++  /** Alt says the click came with the modifier: the app opens the file, not its folder. */
++  onHyperlinkClick?: (url: string, modifiers?: { alt: boolean }) => void
 +
 +  /** Called when the link under the pointer changes (undefined = left it). The
 +   *  position is the cell it entered on, so a card can sit next to the pointer. */
@@ -58,7 +111,7 @@ index 41d02d52a0d..4e5883d3047 100644
  }
  
  export type Instance = {
-@@ -155,7 +159,8 @@ export async function createRoot({
+@@ -155,7 +160,8 @@ export async function createRoot({
    exitOnCtrlC = true,
    patchConsole = true,
    onFrame,
@@ -68,7 +121,7 @@ index 41d02d52a0d..4e5883d3047 100644
  }: RenderOptions = {}): Promise<Root> {
    // See wrappedRender — preserve microtask boundary from the old WASM await.
    await Promise.resolve()
-@@ -167,7 +172,8 @@ export async function createRoot({
+@@ -167,7 +173,8 @@ export async function createRoot({
      exitOnCtrlC,
      patchConsole,
      onFrame,
@@ -80,10 +133,10 @@ index 41d02d52a0d..4e5883d3047 100644
    // Register in the instances map so that code that looks up the Ink
 diff --git a/ui-tui/src/__tests__/pathCard.test.tsx b/ui-tui/src/__tests__/pathCard.test.tsx
 new file mode 100644
-index 00000000000..1b6924a65e1
+index 00000000000..0da50782e5e
 --- /dev/null
 +++ b/ui-tui/src/__tests__/pathCard.test.tsx
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,109 @@
 +import { writeFileSync } from 'fs'
 +import { PassThrough } from 'stream'
 +
@@ -158,11 +211,18 @@ index 00000000000..1b6924a65e1
 +
 +  it('picks the highlighter by the file extension', () => {
 +    writeFileSync('/tmp/cardtest/sample.txt', 'export const answer = 42\n')
++    writeFileSync('/tmp/cardtest/Dockerfile', 'FROM node:22\n')
++    writeFileSync('/tmp/cardtest/.env', 'PORT=3000\n')
++    writeFileSync('/tmp/cardtest/.env.local', 'PORT=3001\n')
 +    $pathHover.set({ path: '/tmp/cardtest/sample.ts', line: 1, row: 4, col: 10 })
 +
 +    expect(renderCard().frame.join('\n')).toContain('export const answer = 42')
 +    expect(bodyOf('/tmp/cardtest/sample.ts').lang).toBe('ts')
 +    expect(bodyOf('/tmp/cardtest/sample.txt').lang).toBe('')
++    // Files whose name is the language, no extension to go by.
++    expect(bodyOf('/tmp/cardtest/Dockerfile').lang).toBe('sh')
++    expect(bodyOf('/tmp/cardtest/.env').lang).toBe('sh')
++    expect(bodyOf('/tmp/cardtest/.env.local').lang).toBe('sh')
 +  })
 +
 +  it('lists a folder without pretending its names are line numbers', () => {
@@ -221,10 +281,10 @@ index 00000000000..d574e8f62fc
 +})
 diff --git a/ui-tui/src/__tests__/pathLinks.test.ts b/ui-tui/src/__tests__/pathLinks.test.ts
 new file mode 100644
-index 00000000000..1c6ddbd1d8d
+index 00000000000..6b97baecadb
 --- /dev/null
 +++ b/ui-tui/src/__tests__/pathLinks.test.ts
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,265 @@
 +import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 +import { tmpdir } from 'node:os'
 +import { join } from 'node:path'
@@ -401,6 +461,22 @@ index 00000000000..1c6ddbd1d8d
 +
 +    expect(calls.map(call => call.command)).toEqual(['dbus-send', 'xdg-open'])
 +    expect(calls[1].args).toEqual([root])
++  })
++
++  it('opens the file itself with alt-click, not the folder it is in', () => {
++    clearPathPeek()
++    calls.length = 0
++    openExternalUrl(fileUrl(file, 2), {
++      alt: true,
++      env: { DISPLAY: ':0' },
++      platform: () => 'linux',
++      spawn: fakeSpawn
++    })
++
++    expect(calls).toHaveLength(1)
++    expect(calls[0].command).toBe('xdg-open')
++    expect(calls[0].args).toEqual([file])
++    expect($pathPeek.get()).toBeNull()
 +  })
 +
 +  it('opens the path in the TUI when there is no display to show a file manager in', () => {
@@ -768,7 +844,7 @@ index 00000000000..374f479cff4
 +  )
 +})
 diff --git a/ui-tui/src/entry.tsx b/ui-tui/src/entry.tsx
-index 210889d72a4..943856e9199 100644
+index 210889d72a4..8103b4cad7b 100644
 --- a/ui-tui/src/entry.tsx
 +++ b/ui-tui/src/entry.tsx
 @@ -14,6 +14,7 @@ import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.
@@ -779,23 +855,26 @@ index 210889d72a4..943856e9199 100644
  import { clearNativeTuiFrame, resetTerminalModes } from './lib/terminalModes.js'
  
  if (!process.stdin.isTTY) {
-@@ -182,6 +183,7 @@ ink.render(<App gw={gw} />, {
+@@ -182,7 +183,8 @@ ink.render(<App gw={gw} />, {
    // The TUI's mouse tracking captures click events before Terminal.app's
    // own URL detection can fire, so without this hook clicks on `<Link>`
    // do nothing in any terminal where mouseTracking is on.
+-  onHyperlinkClick: url => {
+-    openExternalUrl(url)
 +  onHyperlinkHover: (url, position) => setHoveredLink(url, position),
-   onHyperlinkClick: url => {
-     openExternalUrl(url)
++  onHyperlinkClick: (url, modifiers) => {
++    openExternalUrl(url, { alt: modifiers?.alt === true })
    }
+ })
 diff --git a/ui-tui/src/lib/openExternalUrl.ts b/ui-tui/src/lib/openExternalUrl.ts
-index 6c095a8d16f..3cf692a21e8 100644
+index 6c095a8d16f..3c86f7c2df2 100644
 --- a/ui-tui/src/lib/openExternalUrl.ts
 +++ b/ui-tui/src/lib/openExternalUrl.ts
 @@ -1,6 +1,10 @@
  import { spawn, type SpawnOptions } from 'node:child_process'
  import { platform } from 'node:os'
  
-+import { openWithUserCommand, revealInFileManager } from './openLocalPath.js'
++import { openLocalFile, openWithUserCommand, revealInFileManager } from './openLocalPath.js'
 +import { requestPathPeek } from './pathPeek.js'
 +import { isLocalFile, localPathOf, PEEK_SCHEME } from './paths.js'
 +
@@ -812,7 +891,7 @@ index 6c095a8d16f..3cf692a21e8 100644
   *   rejected — a hostile model could otherwise emit `<Link url="file:///">`
   *   and trick a click into running an arbitrary local handler.
   * - Hostname is parsed via `URL`; only well-formed URLs are forwarded.
-@@ -31,6 +36,23 @@ import { platform } from 'node:os'
+@@ -31,6 +36,26 @@ import { platform } from 'node:os'
   * pop.
   */
  export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies = {}): boolean {
@@ -823,10 +902,13 @@ index 6c095a8d16f..3cf692a21e8 100644
 +  const local = localUrl(rawUrl)
 +
 +  if (local) {
-+    if (
-+      !openWithUserCommand(local.path, local.line, dependencies) &&
-+      !revealInFileManager(local.path, dependencies)
-+    ) {
++    const opened =
++      openWithUserCommand(local.path, local.line, dependencies) ||
++      (dependencies.alt === true
++        ? openLocalFile(local.path, dependencies)
++        : revealInFileManager(local.path, dependencies))
++
++    if (!opened) {
 +      requestPathPeek(local.path, local.line)
 +    }
 +
@@ -836,11 +918,13 @@ index 6c095a8d16f..3cf692a21e8 100644
    const url = parseSafeUrl(rawUrl)
  
    if (!url) {
-@@ -82,6 +104,26 @@ export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies =
+@@ -82,6 +107,28 @@ export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies =
  export type OpenDependencies = {
    spawn?: typeof spawn
    platform?: () => string
 +  env?: NodeJS.ProcessEnv
++  /** The click came with alt: open the file, not the folder it is in. */
++  alt?: boolean
 +}
 +
 +/**
@@ -865,10 +949,10 @@ index 6c095a8d16f..3cf692a21e8 100644
  /**
 diff --git a/ui-tui/src/lib/openLocalPath.ts b/ui-tui/src/lib/openLocalPath.ts
 new file mode 100644
-index 00000000000..ea9000ffd48
+index 00000000000..f29d3f63bdf
 --- /dev/null
 +++ b/ui-tui/src/lib/openLocalPath.ts
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,119 @@
 +import { spawn, type SpawnOptions } from 'node:child_process'
 +
 +/**
@@ -914,6 +998,17 @@ index 00000000000..ea9000ffd48
 +  const command = template.replaceAll('{file}', quoted(path)).replaceAll('{line}', String(line ?? 1))
 +
 +  return detached(spawnFn, '/bin/sh', ['-c', command])
++}
++
++/** Opens the file itself with whatever the desktop has for it (alt-click). */
++export function openLocalFile(path: string, dependencies: LocalOpenDependencies = {}): boolean {
++  const env = dependencies.env ?? process.env
++
++  if (!env.DISPLAY && !env.WAYLAND_DISPLAY) {
++    return false
++  }
++
++  return detached(dependencies.spawn ?? spawn, 'xdg-open', [path])
 +}
 +
 +/** Shows the path in the desktop's file manager, the file selected. */
@@ -1091,10 +1186,10 @@ index 00000000000..da7fe146b81
 +}
 diff --git a/ui-tui/src/lib/pathPreview.ts b/ui-tui/src/lib/pathPreview.ts
 new file mode 100644
-index 00000000000..372270c76c2
+index 00000000000..9a28663b4df
 --- /dev/null
 +++ b/ui-tui/src/lib/pathPreview.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,142 @@
 +import { readdirSync, readFileSync, statSync } from 'node:fs'
 +
 +/**
@@ -1116,6 +1211,32 @@ index 00000000000..372270c76c2
 +  bash: 'sh', cjs: 'ts', cts: 'ts', go: 'go', js: 'ts', json: 'json', jsonc: 'json',
 +  jsx: 'ts', mjs: 'ts', mts: 'ts', py: 'py', pyi: 'py', rs: 'rust', sh: 'sh',
 +  sql: 'sql', ts: 'ts', tsx: 'ts', yaml: 'yaml', yml: 'yaml', zsh: 'sh'
++}
++
++/** Files whose name is the language, no extension to go by. */
++const BY_NAME: Record<string, string> = {
++  '.bashrc': 'sh',
++  '.dockerignore': 'sh',
++  '.env': 'sh',
++  '.gitignore': 'sh',
++  '.profile': 'sh',
++  '.zshrc': 'sh',
++  dockerfile: 'sh'
++}
++
++const langOf = (path: string): string => {
++  const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase()
++
++  if (BY_NAME[name]) {
++    return BY_NAME[name]
++  }
++
++  // `.env.local`, `.env.production`: the same thing as `.env`.
++  if (name.startsWith('.env')) {
++    return 'sh'
++  }
++
++  return LANGS[name.slice(name.lastIndexOf('.') + 1)] ?? ''
 +}
 +
 +export type PreviewLine = { number: number; text: string; mark: boolean }
@@ -1172,13 +1293,12 @@ index 00000000000..372270c76c2
 +
 +    const mark = line !== undefined && line >= 1 && line <= all.length ? line : 0
 +    const first = mark > 0 ? Math.max(1, mark - CONTEXT) : 1
-+    const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
 +
 +    return {
 +      title: `${path}${mark > 0 ? `:${mark}` : ''}`,
 +      meta: `${all.length} lines`,
 +      numbered: true,
-+      lang: LANGS[extension] ?? '',
++      lang: langOf(path),
 +      lines: all.slice(first - 1, first - 1 + rows).map((row, offset) => {
 +        const number = first + offset
 +
@@ -1468,13 +1588,15 @@ index 00000000000..caa1ddba663
 +  return { start: 0, end: code.length, label: code, path, ...(line === undefined ? {} : { line }) }
 +}
 diff --git a/ui-tui/src/types/hermes-ink.d.ts b/ui-tui/src/types/hermes-ink.d.ts
-index 2510907a493..9d06a9a1514 100644
+index 2510907a493..091ab1e69ce 100644
 --- a/ui-tui/src/types/hermes-ink.d.ts
 +++ b/ui-tui/src/types/hermes-ink.d.ts
-@@ -69,6 +69,7 @@ declare module '@hermes/ink' {
+@@ -68,7 +68,8 @@ declare module '@hermes/ink' {
+     readonly exitOnCtrlC?: boolean
      readonly patchConsole?: boolean
      readonly onFrame?: (event: FrameEvent) => void
-     readonly onHyperlinkClick?: (url: string) => void
+-    readonly onHyperlinkClick?: (url: string) => void
++    readonly onHyperlinkClick?: (url: string, modifiers?: { alt: boolean }) => void
 +    readonly onHyperlinkHover?: (url: string | undefined, position?: { col: number; row: number }) => void
    }
  

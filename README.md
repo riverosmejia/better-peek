@@ -67,8 +67,8 @@ rama).
 /better-peek              el modal del TUI (flechas, Enter, c para copiar, Esc)
 ```
 
-Con el parche, además, el ratón. El clic sigue el orden: `PEEK_OPEN` si lo defines, si no el
-explorador de archivos (`org.freedesktop.FileManager1`; si no está, `xdg-open` en la carpeta), y sin
+Con el parche, además, el ratón. El clic sigue el orden: `PEEK_OPEN` si lo defines; si no, con **Alt** abre el fichero con su
+programa y sin Alt el explorador de archivos (`org.freedesktop.FileManager1`; si no está, `xdg-open` en la carpeta), y sin
 pantalla —por ssh— el fichero en el visor del TUI, que es lo único que funciona ahí. `PEEK_OPEN` se
 ejecuta con `{file}` y `{line}` sustituidos y la ruta entrecomillada:
 
