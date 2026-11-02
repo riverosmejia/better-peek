@@ -78,6 +78,103 @@ index 41d02d52a0d..4e5883d3047 100644
    })
  
    // Register in the instances map so that code that looks up the Ink
+diff --git a/ui-tui/src/__tests__/pathCard.test.tsx b/ui-tui/src/__tests__/pathCard.test.tsx
+new file mode 100644
+index 00000000000..cf2e469b898
+--- /dev/null
++++ b/ui-tui/src/__tests__/pathCard.test.tsx
+@@ -0,0 +1,91 @@
++import { writeFileSync } from 'fs'
++import { PassThrough } from 'stream'
++
++import { Box, renderSync } from '@hermes/ink'
++import { stripAnsi } from '@hermes/shared/ansi'
++import React from 'react'
++import { afterEach, describe, expect, it } from 'vitest'
++
++import { PathCard } from '../components/pathCard.js'
++import { $pathHover } from '../lib/pathHover.js'
++import { bodyOf } from '../lib/pathPreview.js'
++import { DEFAULT_THEME } from '../theme.js'
++
++const renderCard = (columns = 120): { frame: string[]; raw: string } => {
++  const stdout = new PassThrough()
++  const stdin = new PassThrough()
++  const stderr = new PassThrough()
++  let output = ''
++
++  Object.assign(stdout, { columns, isTTY: false, rows: 40 })
++  Object.assign(stdin, { isTTY: false })
++  Object.assign(stderr, { isTTY: false })
++  stdout.on('data', (chunk: Buffer) => {
++    output += chunk.toString()
++  })
++
++  const instance = renderSync(
++    <Box flexDirection="column" height={40} width={columns}>
++      <PathCard t={DEFAULT_THEME} />
++    </Box>,
++    {
++      patchConsole: false,
++      stderr: stderr as unknown as NodeJS.WriteStream,
++      stdin: stdin as unknown as NodeJS.ReadStream,
++      stdout: stdout as unknown as NodeJS.WriteStream
++    }
++  )
++
++  instance.unmount()
++  instance.cleanup()
++
++  return {
++    frame: stripAnsi(output)
++      .split('\n')
++      .map(line => line.replace(/\s+$/, '')),
++    raw: output
++  }
++}
++
++
++
++describe('PathCard', () => {
++  afterEach(() => {
++    $pathHover.set(null)
++  })
++
++  it('says what the file is and what a click does', () => {
++    $pathHover.set({ path: `${process.cwd()}/package.json`, row: 4, col: 10 })
++
++    expect(renderCard().frame.join('\n')).toContain('package.json · 47 lines · click: open the file')
++  })
++
++  it('shows the named line, marked, with its number', () => {
++    $pathHover.set({ path: `${process.cwd()}/package.json`, line: 3, row: 4, col: 10 })
++
++    const frame = renderCard().frame.join('\n')
++
++    expect(frame).toContain('package.json:3')
++    expect(frame).toContain('▸')
++    expect(frame).toContain('"version": "0.0.1"')
++  })
++
++  it('picks the highlighter by the file extension', () => {
++    writeFileSync('/tmp/cardtest/sample.txt', 'export const answer = 42\n')
++    $pathHover.set({ path: '/tmp/cardtest/sample.ts', line: 1, row: 4, col: 10 })
++
++    expect(renderCard().frame.join('\n')).toContain('export const answer = 42')
++    expect(bodyOf('/tmp/cardtest/sample.ts').lang).toBe('ts')
++    expect(bodyOf('/tmp/cardtest/sample.txt').lang).toBe('')
++  })
++
++  it('draws nothing when the pointer is not on a path', () => {
++    expect(renderCard().frame.join('\n').trim()).toBe('')
++  })
++
++  it('says why, instead of lines, when the file is missing', () => {
++    $pathHover.set({ path: '/nope/does-not-exist.ts', row: 4, col: 10 })
++
++    expect(renderCard().frame.join('\n')).toContain('cannot read it')
++  })
++})
 diff --git a/ui-tui/src/__tests__/pathCardPosition.test.ts b/ui-tui/src/__tests__/pathCardPosition.test.ts
 new file mode 100644
 index 00000000000..d574e8f62fc
@@ -521,23 +618,24 @@ index 1912bca2511..a728193832c 100644
    return (
 diff --git a/ui-tui/src/components/pathCard.tsx b/ui-tui/src/components/pathCard.tsx
 new file mode 100644
-index 00000000000..fee03eabfbe
+index 00000000000..27ed59b6c28
 --- /dev/null
 +++ b/ui-tui/src/components/pathCard.tsx
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,86 @@
 +import { NoSelect, Text, useStdout } from '@hermes/ink'
 +import { useStore } from '@nanostores/react'
 +import { memo, useMemo } from 'react'
 +
 +import { cardPosition } from '../lib/pathCardPosition.js'
 +import { $pathHover } from '../lib/pathHover.js'
-+import { pathPreview } from '../lib/pathPreview.js'
++import { bodyOf } from '../lib/pathPreview.js'
++import { highlightLine } from '../lib/syntax.js'
 +import type { Theme } from '../theme.js'
 +
 +/**
-+ * The card a path answers a hover with: what the file is, and its lines, the one
-+ * the path named marked — drawn in the terminal, next to the pointer, never in a
-+ * window of its own.
++ * The card a path answers a hover with: what the file is, what a click does, and
++ * its lines around the one the path named, coloured by the same highlighter the
++ * transcript uses for its code blocks.
 + *
 + * It sits at the cell the pointer entered the link on (ink hands that over with
 + * the hover), one row below the link when there is room and above it when there
@@ -548,8 +646,9 @@ index 00000000000..fee03eabfbe
 + * overlay — which runs after the frame is painted — inverts those cells back on
 + * top of the card.
 + */
-+const WIDTH = 76
-+const ROWS = 14
++const MIN_WIDTH = 60
++const MAX_WIDTH = 100
++const ROWS = 12
 +
 +export const PathCard = memo(function PathCard({ t }: { t: Theme }) {
 +  const hover = useStore($pathHover)
@@ -557,27 +656,27 @@ index 00000000000..fee03eabfbe
 +  const cols = stdout?.columns ?? 80
 +  const screenRows = stdout?.rows ?? 24
 +
-+  const width = Math.max(20, Math.min(WIDTH, cols - 4))
++  const body = useMemo(
++    () => (hover ? bodyOf(hover.path, hover.line, ROWS) : null),
++    [hover]
++  )
 +
-+  const lines = useMemo(() => {
-+    if (!hover) {
-+      return []
-+    }
++  // The transcript already showed the path: the card names the file, not the whole directory.
++  const name = hover ? (hover.path.slice(hover.path.lastIndexOf('/') + 1) || hover.path) : ''
++  const title = hover?.line === undefined ? name : `${name}:${hover?.line}`
 +
-+    return pathPreview(hover.path, hover.line, ROWS)
-+      .split('\n')
-+      .slice(0, ROWS + 1)
-+      .map(line => (line.length > width - 2 ? `${line.slice(0, width - 3)}…` : line))
-+  }, [hover, width])
++  const header = body
++    ? body.note ?? `${title}${body.meta ? ` · ${body.meta}` : ''} · click: open the file`
++    : ''
 +
-+  if (!hover || !lines.length) {
++  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, header.length + 4, cols - 4))
++
++  if (!body) {
 +    return null
 +  }
 +
-+  const { left, top } = cardPosition(hover, { width, height: lines.length + 2 }, {
-+    cols,
-+    rows: screenRows
-+  })
++  const trunk = body.lines.length > 0 ? body.lines : []
++  const { left, top } = cardPosition(hover ?? undefined, { width, height: trunk.length + 3 }, { cols, rows: screenRows })
 +
 +  return (
 +    <NoSelect
@@ -591,9 +690,19 @@ index 00000000000..fee03eabfbe
 +      top={top}
 +      width={width}
 +    >
-+      {lines.map((line, index) => (
-+        <Text color={index === 0 ? t.color.accent : t.color.label} key={index} wrap="truncate-end">
-+          {line}
++      <Text color={body.note ? t.color.warn : t.color.accent} wrap="truncate-end">
++        {header}
++      </Text>
++      {trunk.map(({ number, text, mark }) => (
++        <Text key={number} wrap="truncate-end">
++          <Text color={mark ? t.color.accent : t.color.muted}>
++            {`${mark ? '▸' : ' '}${String(number).padStart(5)}  `}
++          </Text>
++          {highlightLine(text, body.lang, t).map(([color, token], index) => (
++            <Text color={color || t.color.label} key={index}>
++              {token}
++            </Text>
++          ))}
 +        </Text>
 +      ))}
 +    </NoSelect>
@@ -868,44 +977,73 @@ index 00000000000..da7fe146b81
 +}
 diff --git a/ui-tui/src/lib/pathPreview.ts b/ui-tui/src/lib/pathPreview.ts
 new file mode 100644
-index 00000000000..a01db53e696
+index 00000000000..f04ceb1c90a
 --- /dev/null
 +++ b/ui-tui/src/lib/pathPreview.ts
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,104 @@
 +import { readdirSync, readFileSync, statSync } from 'node:fs'
 +
 +/**
-+ * The text a click on a path shows in the TUI's pager: what the file is, and its
-+ * lines, numbered, with the one the path named marked.
++ * What a path shows when you look at it: the file it names, its lines around the
++ * one the path named, and enough about it to know what you are looking at.
 + *
-+ * Everything that can go wrong (gone, unreadable, binary, enormous, a folder)
-+ * comes back as a line that says so — a click always answers.
++ * Two consumers, one reading: the pager a click opens (plain text, numbered) and
++ * the card a hover shows (the same lines, coloured). Everything that can go wrong
++ * (gone, unreadable, binary, enormous, a folder) comes back as a note that says
++ * so — a click always answers.
 + */
 +
 +const MAX_BYTES = 2 * 1024 * 1024
 +const MAX_DIR_ENTRIES = 200
-+const ROWS = 60
 +const CONTEXT = 10
 +
-+export function pathPreview(path: string, line?: number, rows = ROWS): string {
++/** Extension to the language names `syntax.ts` knows, so the card can colour the lines. */
++const LANGS: Record<string, string> = {
++  bash: 'sh', cjs: 'ts', cts: 'ts', go: 'go', js: 'ts', json: 'json', jsonc: 'json',
++  jsx: 'ts', mjs: 'ts', mts: 'ts', py: 'py', pyi: 'py', rs: 'rust', sh: 'sh',
++  sql: 'sql', ts: 'ts', tsx: 'ts', yaml: 'yaml', yml: 'yaml', zsh: 'sh'
++}
++
++export type PreviewLine = { number: number; text: string; mark: boolean }
++
++export type PreviewBody = {
++  /** `src/app.ts:42`, or `src/` for a folder. */
++  title: string
++  /** `49 lines`, `directory, 12 entries`. */
++  meta: string
++  /** The lines to show. Empty when `note` explains why there is nothing. */
++  lines: PreviewLine[]
++  /** Why there is nothing to show, when there is nothing. */
++  note?: string
++  /** The language name `syntax.ts` takes, or '' for plain. */
++  lang: string
++}
++
++export function bodyOf(path: string, line?: number, rows = 60): PreviewBody {
 +  try {
 +    const stat = statSync(path)
 +
 +    if (stat.isDirectory()) {
 +      const entries = readdirSync(path).sort()
-+      const shown = entries.slice(0, MAX_DIR_ENTRIES).map(name => `  ${name}`)
 +
-+      return [`${path}/  ·  directory, ${entries.length} entries`, ...shown].join('\n')
++      return {
++        title: `${path}/`,
++        meta: `directory, ${entries.length} entries`,
++        lines: entries.slice(0, MAX_DIR_ENTRIES).map((name, index) => ({ number: index + 1, text: name, mark: false })),
++        lang: ''
++      }
 +    }
 +
++    const kb = Math.round(stat.size / 1024)
++
 +    if (stat.size > MAX_BYTES) {
-+      return `${path}\n(too large to show: ${Math.round(stat.size / 1024)}k)`
++      return { title: path, meta: '', lines: [], note: `(too large to show: ${kb}k)`, lang: '' }
 +    }
 +
 +    const text = readFileSync(path, 'utf8')
 +
 +    if (text.slice(0, 4096).includes('\0')) {
-+      return `${path}\n(binary file, ${Math.round(stat.size / 1024)}k)`
++      return { title: path, meta: '', lines: [], note: `(binary file, ${kb}k)`, lang: '' }
 +    }
 +
 +    const all = text.split('\n')
@@ -917,18 +1055,35 @@ index 00000000000..a01db53e696
 +
 +    const mark = line !== undefined && line >= 1 && line <= all.length ? line : 0
 +    const first = mark > 0 ? Math.max(1, mark - CONTEXT) : 1
++    const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
 +
-+    const shown = all.slice(first - 1, first - 1 + rows).map((row, offset) => {
-+      const number = first + offset
-+      const flag = number === mark ? '▸' : ' '
++    return {
++      title: `${path}${mark > 0 ? `:${mark}` : ''}`,
++      meta: `${all.length} lines`,
++      lang: LANGS[extension] ?? '',
++      lines: all.slice(first - 1, first - 1 + rows).map((row, offset) => {
++        const number = first + offset
 +
-+      return `${flag}${String(number).padStart(5)}  ${row.replaceAll('\t', '  ').trimEnd()}`
-+    })
-+
-+    return [`${path}${mark > 0 ? `:${mark}` : ''}  ·  ${all.length} lines`, ...shown].join('\n')
++        return { number, text: row.replaceAll('\t', '  ').trimEnd(), mark: number === mark }
++      })
++    }
 +  } catch (error) {
-+    return `${path}\n(cannot read it: ${(error as Error).message})`
++    return { title: path, meta: '', lines: [], note: `(cannot read it: ${(error as Error).message})`, lang: '' }
 +  }
++}
++
++/** The same, as the plain text the pager shows: numbered, the named line marked. */
++export function pathPreview(path: string, line?: number, rows = 60): string {
++  const body = bodyOf(path, line, rows)
++
++  if (body.note) {
++    return `${body.title}\n${body.note}`
++  }
++
++  return [
++    `${body.title}  ·  ${body.meta}`,
++    ...body.lines.map(({ number, text, mark }) => `${mark ? '▸' : ' '}${String(number).padStart(5)}  ${text}`)
++  ].join('\n')
 +}
 diff --git a/ui-tui/src/lib/paths.ts b/ui-tui/src/lib/paths.ts
 new file mode 100644
