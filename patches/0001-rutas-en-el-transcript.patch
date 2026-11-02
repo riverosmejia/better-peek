@@ -80,7 +80,7 @@ index 41d02d52a0d..4e5883d3047 100644
    // Register in the instances map so that code that looks up the Ink
 diff --git a/ui-tui/src/__tests__/pathCard.test.tsx b/ui-tui/src/__tests__/pathCard.test.tsx
 new file mode 100644
-index 00000000000..bd472ddbb3c
+index 00000000000..1b6924a65e1
 --- /dev/null
 +++ b/ui-tui/src/__tests__/pathCard.test.tsx
 @@ -0,0 +1,102 @@
@@ -143,7 +143,7 @@ index 00000000000..bd472ddbb3c
 +  it('says what the file is and what a click does', () => {
 +    $pathHover.set({ path: `${process.cwd()}/package.json`, row: 4, col: 10 })
 +
-+    expect(renderCard().frame.join('\n')).toContain('package.json · 47 lines · click: open the file')
++    expect(renderCard().frame.join('\n')).toContain('package.json · 47 lines · click: show in folder')
 +  })
 +
 +  it('shows the named line, marked, with its number', () => {
@@ -221,10 +221,10 @@ index 00000000000..d574e8f62fc
 +})
 diff --git a/ui-tui/src/__tests__/pathLinks.test.ts b/ui-tui/src/__tests__/pathLinks.test.ts
 new file mode 100644
-index 00000000000..638d824e803
+index 00000000000..1c6ddbd1d8d
 --- /dev/null
 +++ b/ui-tui/src/__tests__/pathLinks.test.ts
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,249 @@
 +import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 +import { tmpdir } from 'node:os'
 +import { join } from 'node:path'
@@ -359,12 +359,58 @@ index 00000000000..638d824e803
 +  const file = join(root, 'click.ts')
 +  writeFileSync(file, 'a\nb\nc\n')
 +
-+  it('asks the TUI to show the file when no opener is configured', () => {
++  it('shows the file in the file manager when no opener is configured', () => {
 +    clearPathPeek()
 +    calls.length = 0
-+    expect(openExternalUrl(fileUrl(file, 2), { spawn: fakeSpawn, platform: () => 'linux' })).toBe(true)
-+    expect($pathPeek.get()).toEqual({ path: file, line: 2 })
++    expect(
++      openExternalUrl(fileUrl(file, 2), {
++        env: { DISPLAY: ':0' },
++        spawn: fakeSpawn,
++        platform: () => 'linux'
++      })
++    ).toBe(true)
++    expect(calls[0].command).toBe('dbus-send')
++    expect(calls[0].args).toContain(`array:string:file://${file}`)
++    // Nothing of the TUI's: the click was answered outside it.
++    expect($pathPeek.get()).toBeNull()
++  })
++
++  it('falls back to the folder with xdg-open when the file manager says no', async () => {
++    calls.length = 0
++
++    const refusingSpawn = ((command: string, args: readonly string[]) => {
++      calls.push({ command, args })
++
++      return {
++        once: (event: string, fn: (code: number) => void) => {
++          if (event === 'exit') {
++            queueMicrotask(() => fn(1))
++          }
++        },
++        unref: () => {},
++        stdin: { end: () => {} }
++      }
++    }) as never
++
++    openExternalUrl(fileUrl(file, 2), {
++      env: { WAYLAND_DISPLAY: 'wayland-0' },
++      spawn: refusingSpawn,
++      platform: () => 'linux'
++    })
++    await Promise.resolve()
++
++    expect(calls.map(call => call.command)).toEqual(['dbus-send', 'xdg-open'])
++    expect(calls[1].args).toEqual([root])
++  })
++
++  it('opens the path in the TUI when there is no display to show a file manager in', () => {
++    clearPathPeek()
++    calls.length = 0
++    expect(
++      openExternalUrl(fileUrl(file, 2), { env: {}, spawn: fakeSpawn, platform: () => 'linux' })
++    ).toBe(true)
 +    expect(calls).toHaveLength(0)
++    expect($pathPeek.get()).toEqual({ path: file, line: 2 })
 +  })
 +
 +  it('runs the user template through sh, with the path quoted, when PEEK_OPEN is set', () => {
@@ -629,7 +675,7 @@ index 1912bca2511..a728193832c 100644
    return (
 diff --git a/ui-tui/src/components/pathCard.tsx b/ui-tui/src/components/pathCard.tsx
 new file mode 100644
-index 00000000000..91a458d660b
+index 00000000000..374f479cff4
 --- /dev/null
 +++ b/ui-tui/src/components/pathCard.tsx
 @@ -0,0 +1,88 @@
@@ -676,7 +722,7 @@ index 00000000000..91a458d660b
 +  const name = hover ? (hover.path.slice(hover.path.lastIndexOf('/') + 1) || hover.path) : ''
 +  const title = hover?.line === undefined ? name : `${name}:${hover?.line}`
 +
-+  const action = body?.numbered === false ? 'click: list the folder' : 'click: open the file'
++  const action = body?.numbered === false ? 'click: list the folder' : 'click: show in folder'
 +
 +  const header = body
 +    ? body.note ?? `${title}${body.meta ? ` · ${body.meta}` : ''}${body.note ? '' : ` · ${action}`}`
@@ -742,14 +788,14 @@ index 210889d72a4..943856e9199 100644
      openExternalUrl(url)
    }
 diff --git a/ui-tui/src/lib/openExternalUrl.ts b/ui-tui/src/lib/openExternalUrl.ts
-index 6c095a8d16f..b687f168d51 100644
+index 6c095a8d16f..3cf692a21e8 100644
 --- a/ui-tui/src/lib/openExternalUrl.ts
 +++ b/ui-tui/src/lib/openExternalUrl.ts
 @@ -1,6 +1,10 @@
  import { spawn, type SpawnOptions } from 'node:child_process'
  import { platform } from 'node:os'
  
-+import { openWithUserCommand } from './openLocalPath.js'
++import { openWithUserCommand, revealInFileManager } from './openLocalPath.js'
 +import { requestPathPeek } from './pathPeek.js'
 +import { isLocalFile, localPathOf, PEEK_SCHEME } from './paths.js'
 +
@@ -766,17 +812,21 @@ index 6c095a8d16f..b687f168d51 100644
   *   rejected — a hostile model could otherwise emit `<Link url="file:///">`
   *   and trick a click into running an arbitrary local handler.
   * - Hostname is parsed via `URL`; only well-formed URLs are forwarded.
-@@ -31,6 +36,19 @@ import { platform } from 'node:os'
+@@ -31,6 +36,23 @@ import { platform } from 'node:os'
   * pop.
   */
  export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies = {}): boolean {
-+  // A path in an answer is a link of its own: clicking it shows the file in the
-+  // TUI (or runs the user's PEEK_OPEN), never a browser handler. Only an existing
-+  // local file qualifies — anything else falls through and is refused below.
++  // A path in an answer is a link of its own: clicking it runs the user's PEEK_OPEN,
++  // else shows it in their file manager with the file selected, else opens it in the
++  // TUI's pager — never a browser handler, and it always answers. Only an existing
++  // local file qualifies; anything else falls through and is refused below.
 +  const local = localUrl(rawUrl)
 +
 +  if (local) {
-+    if (!openWithUserCommand(local.path, local.line)) {
++    if (
++      !openWithUserCommand(local.path, local.line, dependencies) &&
++      !revealInFileManager(local.path, dependencies)
++    ) {
 +      requestPathPeek(local.path, local.line)
 +    }
 +
@@ -786,10 +836,13 @@ index 6c095a8d16f..b687f168d51 100644
    const url = parseSafeUrl(rawUrl)
  
    if (!url) {
-@@ -84,6 +102,25 @@ export type OpenDependencies = {
+@@ -82,6 +104,26 @@ export function openExternalUrl(rawUrl: string, dependencies: OpenDependencies =
+ export type OpenDependencies = {
+   spawn?: typeof spawn
    platform?: () => string
- }
- 
++  env?: NodeJS.ProcessEnv
++}
++
 +/**
 + * The local file a `hermes-peek://` link names, when it is one that exists. That
 + * scheme is only ever produced by the markdown renderer for paths that resolved
@@ -807,21 +860,19 @@ index 6c095a8d16f..b687f168d51 100644
 +  } catch {
 +    return null
 +  }
-+}
-+
+ }
+ 
  /**
-  * Validate and normalize a URL for opening externally.
-  * Exported for testing.
 diff --git a/ui-tui/src/lib/openLocalPath.ts b/ui-tui/src/lib/openLocalPath.ts
 new file mode 100644
-index 00000000000..9d497dbaa3a
+index 00000000000..ea9000ffd48
 --- /dev/null
 +++ b/ui-tui/src/lib/openLocalPath.ts
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,108 @@
 +import { spawn, type SpawnOptions } from 'node:child_process'
 +
 +/**
-+ * Runs the user's own opener for a clicked path, when they configured one.
++ * Running the user's own opener, and showing a path in their file manager.
 + *
 + * `PEEK_OPEN` is a command template, run through `/bin/sh -c`, with `{file}` and
 + * `{line}` substituted:
@@ -833,10 +884,14 @@ index 00000000000..9d497dbaa3a
 + * quotes escaped) before it reaches the template: it can never turn into a
 + * second command.
 + *
-+ * Returns false when there is no template, or the spawn threw. The caller then
-+ * shows the file inside the TUI — the answer that works with no display, no
-+ * clipboard and no editor, and the only one that tells the reader something
-+ * happened.
++ * With no template, a click shows the path in the file manager, the file
++ * selected: `org.freedesktop.FileManager1` (the standard way, what Dolphin,
++ * Nautilus, Thunar and Nemo all answer) and, if that service is not there or
++ * says no, its folder with `xdg-open`.
++ *
++ * Both return false when nothing could be started. The caller then shows the
++ * file inside the TUI — the answer that works with no display, no clipboard and
++ * no desktop, and the only one that tells the reader something happened.
 + */
 +export type LocalOpenDependencies = {
 +  spawn?: typeof spawn
@@ -858,13 +913,59 @@ index 00000000000..9d497dbaa3a
 +
 +  const command = template.replaceAll('{file}', quoted(path)).replaceAll('{line}', String(line ?? 1))
 +
-+  try {
-+    const child = spawnFn('/bin/sh', ['-c', command], {
-+      detached: true,
-+      stdio: 'ignore'
-+    } satisfies SpawnOptions)
++  return detached(spawnFn, '/bin/sh', ['-c', command])
++}
 +
-+    // A missing binary must not crash the TUI; the caller falls back to the pager.
++/** Shows the path in the desktop's file manager, the file selected. */
++export function revealInFileManager(path: string, dependencies: LocalOpenDependencies = {}): boolean {
++  const spawnFn = dependencies.spawn ?? spawn
++  const env = dependencies.env ?? process.env
++
++  // No display, no file manager: over ssh the click belongs to the TUI, which is the
++  // one answer that works there. That is the whole point of returning false.
++  if (!env.DISPLAY && !env.WAYLAND_DISPLAY) {
++    return false
++  }
++
++  const url = `file://${encodeURI(path)}`
++  const folder = path.slice(0, path.lastIndexOf('/')) || '/'
++
++  try {
++    const child = spawnFn(
++      'dbus-send',
++      [
++        '--session',
++        '--print-reply',
++        '--dest=org.freedesktop.FileManager1',
++        '/org/freedesktop/FileManager1',
++        'org.freedesktop.FileManager1.ShowItems',
++        `array:string:${url}`,
++        ''
++      ],
++      { stdio: 'ignore' }
++    )
++
++    // A service that answers "no" (or is not there) leaves the folder to xdg-open.
++    child.once('error', () => {
++      detached(spawnFn, 'xdg-open', [folder])
++    })
++    child.once('exit', code => {
++      if (code !== 0) {
++        detached(spawnFn, 'xdg-open', [folder])
++      }
++    })
++
++    return true
++  } catch {
++    return detached(spawnFn, 'xdg-open', [folder])
++  }
++}
++
++/** Starts something and lets it go; false when the binary is not there. */
++function detached(spawnFn: typeof spawn, command: string, args: string[]): boolean {
++  try {
++    const child = spawnFn(command, args, { detached: true, stdio: 'ignore' } satisfies SpawnOptions)
++
 +    child.once('error', () => {})
 +    child.unref()
 +
