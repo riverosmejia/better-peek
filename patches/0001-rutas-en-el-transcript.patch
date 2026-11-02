@@ -1,13 +1,5 @@
-Rutas enlazadas en el transcript, con tarjeta al pasar el ratón y clic al visor.
-Se aplica sobre ~/.hermes/hermes-agent (ver apply.sh). Toca solo ui-tui:
-- lib/paths.ts y lib/pathHover.ts y lib/pathPeek.ts y lib/pathPreview.ts y lib/openLocalPath.ts (nuevos)
-- components/pathCard.tsx (nuevo), components/markdown.tsx, components/appLayout.tsx, entry.tsx
-- packages/hermes-ink: la opción onHyperlinkHover
-- app/useMainApp.ts: el clic abre el fichero en el visor
-- __tests__/pathLinks.test.ts
-
 diff --git a/ui-tui/packages/hermes-ink/src/ink/ink.tsx b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
-index a574c080792..f1c0a319885 100644
+index a574c080792..0404f650432 100644
 --- a/ui-tui/packages/hermes-ink/src/ink/ink.tsx
 +++ b/ui-tui/packages/hermes-ink/src/ink/ink.tsx
 @@ -170,6 +170,14 @@ export type Options = {
@@ -21,7 +13,7 @@ index a574c080792..f1c0a319885 100644
 +   * same signal, for an app that wants to answer the hover with something more
 +   * than an affordance (a card with the file the path names, say).
 +   */
-+  onHyperlinkHover?: (url: string | undefined) => void
++  onHyperlinkHover?: (url: string | undefined, position?: { col: number; row: number }) => void
  }
  export default class Ink {
    private readonly log: LogUpdate
@@ -37,7 +29,7 @@ index a574c080792..f1c0a319885 100644
  
      if (next !== this.hoveredHyperlink) {
        this.hoveredHyperlink = next
-+      this.onHyperlinkHover?.(next)
++      this.onHyperlinkHover?.(next, next ? { col, row } : undefined)
        this.scheduleRender()
      }
    }
@@ -46,26 +38,27 @@ index a574c080792..f1c0a319885 100644
    onHyperlinkClick: ((url: string) => void) | undefined
  
 +  /** Stable wrapper for onHyperlinkHover: fired when the hovered link changes. */
-+  onHyperlinkHover: ((url: string | undefined) => void) | undefined
++  onHyperlinkHover: ((url: string | undefined, position?: { col: number; row: number }) => void) | undefined
 +
    /**
     * Stable prototype wrapper for onHyperlinkClick. Passed to <App> as
     * onOpenHyperlink so the prop is a bound method (autoBind'd) that reads
 diff --git a/ui-tui/packages/hermes-ink/src/ink/root.ts b/ui-tui/packages/hermes-ink/src/ink/root.ts
-index 41d02d52a0d..9702037b55c 100644
+index 41d02d52a0d..4e5883d3047 100644
 --- a/ui-tui/packages/hermes-ink/src/ink/root.ts
 +++ b/ui-tui/packages/hermes-ink/src/ink/root.ts
-@@ -60,6 +60,9 @@ export type RenderOptions = {
+@@ -60,6 +60,10 @@ export type RenderOptions = {
     * click in any terminal where mouse tracking is on.
     */
    onHyperlinkClick?: (url: string) => void
 +
-+  /** Called when the link under the pointer changes (undefined = left it). */
-+  onHyperlinkHover?: (url: string | undefined) => void
++  /** Called when the link under the pointer changes (undefined = left it). The
++   *  position is the cell it entered on, so a card can sit next to the pointer. */
++  onHyperlinkHover?: (url: string | undefined, position?: { col: number; row: number }) => void
  }
  
  export type Instance = {
-@@ -155,7 +158,8 @@ export async function createRoot({
+@@ -155,7 +159,8 @@ export async function createRoot({
    exitOnCtrlC = true,
    patchConsole = true,
    onFrame,
@@ -75,7 +68,7 @@ index 41d02d52a0d..9702037b55c 100644
  }: RenderOptions = {}): Promise<Root> {
    // See wrappedRender — preserve microtask boundary from the old WASM await.
    await Promise.resolve()
-@@ -167,7 +171,8 @@ export async function createRoot({
+@@ -167,7 +172,8 @@ export async function createRoot({
      exitOnCtrlC,
      patchConsole,
      onFrame,
@@ -85,6 +78,39 @@ index 41d02d52a0d..9702037b55c 100644
    })
  
    // Register in the instances map so that code that looks up the Ink
+diff --git a/ui-tui/src/__tests__/pathCardPosition.test.ts b/ui-tui/src/__tests__/pathCardPosition.test.ts
+new file mode 100644
+index 00000000000..d574e8f62fc
+--- /dev/null
++++ b/ui-tui/src/__tests__/pathCardPosition.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest'
++
++import { cardPosition } from '../lib/pathCardPosition.js'
++
++const screen = { cols: 120, rows: 40 }
++const box = { width: 76, height: 10 }
++
++describe('cardPosition', () => {
++  it('sits below the pointer, two cells right of it', () => {
++    expect(cardPosition({ col: 20, row: 10 }, box, screen)).toEqual({ left: 18, top: 12 })
++  })
++
++  it('flips above when there is no room below', () => {
++    expect(cardPosition({ col: 20, row: 35 }, box, screen)).toEqual({ left: 18, top: 24 })
++  })
++
++  it('clamps to the right edge instead of running off it', () => {
++    expect(cardPosition({ col: 110, row: 10 }, box, screen).left).toBe(screen.cols - box.width)
++  })
++
++  it('falls back to the bottom-right corner without an anchor', () => {
++    expect(cardPosition(undefined, box, screen)).toEqual({
++      left: screen.cols - box.width - 1,
++      top: screen.rows - box.height - 1
++    })
++  })
++})
 diff --git a/ui-tui/src/__tests__/pathLinks.test.ts b/ui-tui/src/__tests__/pathLinks.test.ts
 new file mode 100644
 index 00000000000..638d824e803
@@ -332,7 +358,7 @@ index d287657e62a..851d06a2c96 100644
      (title: string, sections: PanelSection[]) =>
        appendMessage({ kind: 'panel', panelData: { sections, title }, role: 'system', text: '' }),
 diff --git a/ui-tui/src/components/appLayout.tsx b/ui-tui/src/components/appLayout.tsx
-index 1abd5838245..310e8df8061 100644
+index 1abd5838245..c0f0aa07247 100644
 --- a/ui-tui/src/components/appLayout.tsx
 +++ b/ui-tui/src/components/appLayout.tsx
 @@ -38,6 +38,7 @@ import { HelpHint } from './helpHint.js'
@@ -343,7 +369,7 @@ index 1abd5838245..310e8df8061 100644
  import { PetKitty, PetSprite } from './petSprite.js'
  import { QueuedMessages } from './queuedMessages.js'
  import { LiveTodoPanel, StreamingAssistant } from './streamingAssistant.js'
-@@ -267,22 +268,28 @@ const TranscriptPane = memo(function TranscriptPane({
+@@ -267,22 +268,27 @@ const TranscriptPane = memo(function TranscriptPane({
  
    return (
      <>
@@ -383,11 +409,21 @@ index 1abd5838245..310e8df8061 100644
 +          </ScrollBox>
 +        )}
 +
-+        <PathCard cols={composer.cols} t={ui.theme} />
 +      </Box>
  
        {!nativeMode && (
          <NoSelect flexShrink={0} marginLeft={1}>
+@@ -656,6 +662,10 @@ export const AppLayout = memo(function AppLayout({
+         )}
+ 
+         {!overlay.agents && !NATIVE_MODE && <PetPane />}
++
++        {/* The hover card is positioned in screen cells: it has to live at the root,
++            where absolute top/left are the pointer's own coordinates. */}
++        <PathCard t={ui.theme} />
+       </Box>
+ 
+       <ActiveWidgetSlot />
 diff --git a/ui-tui/src/components/markdown.tsx b/ui-tui/src/components/markdown.tsx
 index 1912bca2511..a728193832c 100644
 --- a/ui-tui/src/components/markdown.tsx
@@ -485,62 +521,75 @@ index 1912bca2511..a728193832c 100644
    return (
 diff --git a/ui-tui/src/components/pathCard.tsx b/ui-tui/src/components/pathCard.tsx
 new file mode 100644
-index 00000000000..b5fa8f94069
+index 00000000000..fee03eabfbe
 --- /dev/null
 +++ b/ui-tui/src/components/pathCard.tsx
-@@ -0,0 +1,61 @@
-+import { NoSelect, Text } from '@hermes/ink'
+@@ -0,0 +1,74 @@
++import { NoSelect, Text, useStdout } from '@hermes/ink'
 +import { useStore } from '@nanostores/react'
 +import { memo, useMemo } from 'react'
 +
++import { cardPosition } from '../lib/pathCardPosition.js'
 +import { $pathHover } from '../lib/pathHover.js'
 +import { pathPreview } from '../lib/pathPreview.js'
 +import type { Theme } from '../theme.js'
 +
 +/**
 + * The card a path answers a hover with: what the file is, and its lines, the one
-+ * the path named marked — drawn in the terminal, in the corner of the transcript,
-+ * never in a window of its own.
++ * the path named marked — drawn in the terminal, next to the pointer, never in a
++ * window of its own.
 + *
-+ * It is fixed to the bottom-right of the transcript rather than following the
-+ * pointer: ink's hover handlers get no coordinates (only clicks do), so a card
-+ * that chased the cursor would need the event dispatcher itself changed. This one
-+ * holds still, never covers the composer, and needs nothing from the terminal
-+ * beyond the hover event itself.
++ * It sits at the cell the pointer entered the link on (ink hands that over with
++ * the hover), one row below the link when there is room and above it when there
++ * is not, and clamped to the screen so it never runs off an edge.
++ *
++ * It must have a backgroundColor: without one its empty cells are never written,
++ * the transcript underneath keeps its OSC 8 hyperlink, and the hover highlight
++ * overlay — which runs after the frame is painted — inverts those cells back on
++ * top of the card.
 + */
 +const WIDTH = 76
 +const ROWS = 14
 +
-+export const PathCard = memo(function PathCard({ cols, t }: { cols: number; t: Theme }) {
++export const PathCard = memo(function PathCard({ t }: { t: Theme }) {
 +  const hover = useStore($pathHover)
++  const { stdout } = useStdout()
++  const cols = stdout?.columns ?? 80
++  const screenRows = stdout?.rows ?? 24
++
++  const width = Math.max(20, Math.min(WIDTH, cols - 4))
 +
 +  const lines = useMemo(() => {
 +    if (!hover) {
 +      return []
 +    }
 +
-+    const width = Math.max(20, Math.min(WIDTH, cols - 4))
-+
 +    return pathPreview(hover.path, hover.line, ROWS)
 +      .split('\n')
 +      .slice(0, ROWS + 1)
 +      .map(line => (line.length > width - 2 ? `${line.slice(0, width - 3)}…` : line))
-+  }, [cols, hover])
++  }, [hover, width])
 +
 +  if (!hover || !lines.length) {
 +    return null
 +  }
 +
++  const { left, top } = cardPosition(hover, { width, height: lines.length + 2 }, {
++    cols,
++    rows: screenRows
++  })
++
 +  return (
 +    <NoSelect
++      backgroundColor={t.color.completionBg}
 +      borderColor={t.color.border}
 +      borderStyle="round"
-+      bottom={0}
 +      flexDirection="column"
++      left={left}
 +      paddingX={1}
 +      position="absolute"
-+      right={0}
-+      width={Math.max(20, Math.min(WIDTH, cols - 4))}
++      top={top}
++      width={width}
 +    >
 +      {lines.map((line, index) => (
 +        <Text color={index === 0 ? t.color.accent : t.color.label} key={index} wrap="truncate-end">
@@ -551,7 +600,7 @@ index 00000000000..b5fa8f94069
 +  )
 +})
 diff --git a/ui-tui/src/entry.tsx b/ui-tui/src/entry.tsx
-index 210889d72a4..ab87b3dad1d 100644
+index 210889d72a4..943856e9199 100644
 --- a/ui-tui/src/entry.tsx
 +++ b/ui-tui/src/entry.tsx
 @@ -14,6 +14,7 @@ import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.
@@ -566,7 +615,7 @@ index 210889d72a4..ab87b3dad1d 100644
    // The TUI's mouse tracking captures click events before Terminal.app's
    // own URL detection can fire, so without this hook clicks on `<Link>`
    // do nothing in any terminal where mouseTracking is on.
-+  onHyperlinkHover: url => setHoveredLink(url),
++  onHyperlinkHover: (url, position) => setHoveredLink(url, position),
    onHyperlinkClick: url => {
      openExternalUrl(url)
    }
@@ -705,29 +754,67 @@ index 00000000000..9d497dbaa3a
 +
 +/** One argument for the sh template: single quotes, its own quotes escaped. */
 +const quoted = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+diff --git a/ui-tui/src/lib/pathCardPosition.ts b/ui-tui/src/lib/pathCardPosition.ts
+new file mode 100644
+index 00000000000..4a0f05f00d9
+--- /dev/null
++++ b/ui-tui/src/lib/pathCardPosition.ts
+@@ -0,0 +1,28 @@
++/**
++ * Where the hover card goes: at the cell the pointer entered the link on, one gap
++ * below it when there is room and above it when there is not, clamped so it never
++ * runs off an edge. Pure so it can be checked without rendering the terminal.
++ */
++export type CardAnchor = { col?: number; row?: number } | undefined
++export type CardBox = { width: number; height: number }
++export type Screen = { cols: number; rows: number }
++
++export const CARD_GAP = 2
++
++export function cardPosition(anchor: CardAnchor, box: CardBox, screen: Screen, gap = CARD_GAP) {
++  if (anchor?.col === undefined || anchor.row === undefined) {
++    return {
++      left: Math.max(0, screen.cols - box.width - 1),
++      top: Math.max(0, screen.rows - box.height - 1)
++    }
++  }
++
++  const anchorCol = anchor.col
++  const anchorRow = anchor.row
++
++  const left = Math.max(0, Math.min(anchorCol - gap, screen.cols - box.width))
++  const fits = anchorRow + gap + box.height <= screen.rows
++  const top = Math.max(0, fits ? anchorRow + gap : anchorRow - box.height - 1)
++
++  return { left, top }
++}
 diff --git a/ui-tui/src/lib/pathHover.ts b/ui-tui/src/lib/pathHover.ts
 new file mode 100644
-index 00000000000..e8c71ceccf5
+index 00000000000..2e669dd9781
 --- /dev/null
 +++ b/ui-tui/src/lib/pathHover.ts
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,45 @@
 +import { atom } from 'nanostores'
 +
 +import { localPathOf, PEEK_SCHEME } from './paths.js'
 +
-+/**
-+ * The path the pointer is on, if any.
-+ *
-+ * The renderer already knows this — it inverts a link's cells when the pointer
-+ * is over it — and hands it over through `onHyperlinkHover` (wired in entry.tsx).
-+ * Only links this app built (`hermes-peek://`) become a state here: an address
-+ * the model wrote is not a file to preview.
-+ */
-+export type PathHoverState = { path: string; line?: number } | null
++/** The path the pointer is on, if any, and the cell it entered on. */
++export type PathHoverState = { path: string; line?: number; col?: number; row?: number } | null
 +
 +export const $pathHover = atom<PathHoverState>(null)
 +
-+export function setHoveredLink(url: string | undefined): void {
++/**
++ * The renderer already knows this — it inverts a link's cells when the pointer
++ * is over it — and hands it over through `onHyperlinkHover` (wired in entry.tsx),
++ * with the cell the pointer entered on so the card can sit next to it.
++ *
++ * Only links this app built (`hermes-peek://`) become a state here: an address
++ * the model wrote is not a file to preview.
++ */
++export function setHoveredLink(
++  url: string | undefined,
++  position?: { col: number; row: number }
++): void {
 +  if (!url || !url.startsWith(PEEK_SCHEME)) {
 +    if ($pathHover.get() !== null) {
 +      $pathHover.set(null)
@@ -740,12 +827,14 @@ index 00000000000..e8c71ceccf5
 +    const { path, line } = localPathOf(new URL(url))
 +    const current = $pathHover.get()
 +
-+    // Moving along one link fires on every cell: only a different file is news.
++    // Moving along one link fires on every cell: only a different file is news. The cell we
++    // entered on is part of that first event, and it is not updated while the pointer slides
++    // along the same link — otherwise every cell would re-render the card.
 +    if (current?.path === path && current.line === line) {
 +      return
 +    }
 +
-+    $pathHover.set({ path, ...(line === undefined ? {} : { line }) })
++    $pathHover.set({ path, line, col: position?.col, row: position?.row })
 +  } catch {
 +    $pathHover.set(null)
 +  }
@@ -1097,14 +1186,14 @@ index 00000000000..caa1ddba663
 +  return { start: 0, end: code.length, label: code, path, ...(line === undefined ? {} : { line }) }
 +}
 diff --git a/ui-tui/src/types/hermes-ink.d.ts b/ui-tui/src/types/hermes-ink.d.ts
-index 2510907a493..d402bbfe4a8 100644
+index 2510907a493..9d06a9a1514 100644
 --- a/ui-tui/src/types/hermes-ink.d.ts
 +++ b/ui-tui/src/types/hermes-ink.d.ts
 @@ -69,6 +69,7 @@ declare module '@hermes/ink' {
      readonly patchConsole?: boolean
      readonly onFrame?: (event: FrameEvent) => void
      readonly onHyperlinkClick?: (url: string) => void
-+    readonly onHyperlinkHover?: (url: string | undefined) => void
++    readonly onHyperlinkHover?: (url: string | undefined, position?: { col: number; row: number }) => void
    }
  
    export type Instance = {
