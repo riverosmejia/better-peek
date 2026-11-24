@@ -59,6 +59,7 @@ export default function register(sdk) {
 
       const show = next => updateWidget(app, () => next)
       const list = done => run(session ? ['--session', session, '--machine', 'json'] : ['--machine', 'json'], (error, out) => {
+        if (!session) return done({ ...state, note: 'sin sesión: abre /better-peek dentro de una conversación' })
         if (error) return done({ ...state, note: error })
         let hits = []
         try { hits = JSON.parse(out) } catch { return done({ ...state, note: 'respuesta ilegible de peek_cli' }) }

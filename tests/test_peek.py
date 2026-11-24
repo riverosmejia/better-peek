@@ -15,7 +15,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from peek_code import excerpt_of, language_of, tokenize  # noqa: E402
-from peek_cli import card, listing  # noqa: E402
+from peek_cli import card, hermes_home, last_message, listing, redacted, secret_refusal  # noqa: E402
 from peek_paths import Hit, candidates, line_of, path_of_span, paths_in, resolve  # noqa: E402
 
 VIDEO = "/Users/ana/videos/borrador.mp4"
@@ -202,6 +202,53 @@ class Card(unittest.TestCase):
         binary.write_bytes(b"a\x00b")
         self.assertIn("(no preview)", card(Hit("blob.py", str(binary))))
         self.assertIn("dir,", card(Hit("tmp", str(self.dir))))
+
+
+class SafetyTest(unittest.TestCase):
+    """A preview leaves Hermes: the secrets denylist, the session, and the profile home."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = pathlib.Path(self.tmp.name)
+
+    def test_a_secret_file_is_refused_before_it_is_opened(self):
+        secret = self.dir / ".env"
+        secret.write_text("OPENAI_API_KEY=sk-proj-real\n")
+        self.assertIn("does not read it", secret_refusal(str(secret)) or "")
+        self.assertNotIn("sk-proj-real", card(Hit(".env", str(secret))))
+        self.assertIsNone(secret_refusal(str(self.dir / ".env.example")))
+
+    def test_the_home_credential_stores_are_refused(self):
+        home = pathlib.Path.home()
+        for name in (".ssh/id_rsa", ".aws/credentials", ".npmrc", ".netrc", ".config/gh/hosts.yml"):
+            self.assertIsNotNone(secret_refusal(str(home / name)), name)
+        self.assertIsNone(secret_refusal(str(self.dir / "notes.md")))
+
+    def test_a_symlink_with_an_innocuous_name_does_not_get_around_it(self):
+        target = self.dir / ".env"
+        target.write_text("DB_PASSWORD=hunter2\n")
+        link = self.dir / "innocent.txt"
+        link.symlink_to(target)
+        self.assertIn("does not read it", secret_refusal(str(link)) or "")
+
+    def test_every_excerpt_leaves_redacted(self):
+        token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+        self.assertNotIn(token, redacted(f"token {token}"))
+        self.assertEqual(redacted("const MAX_TOKENS = 4000"), "const MAX_TOKENS = 4000")
+
+    def test_no_session_id_reads_nothing(self):
+        self.assertEqual(last_message(None), ("", None))
+        self.assertEqual(last_message(""), ("", None))
+
+    def test_the_home_is_the_profile_the_process_is_in(self):
+        expected = os.environ.get("HERMES_HOME") or str(pathlib.Path.home() / ".hermes")
+        try:
+            from hermes_constants import get_hermes_home  # noqa: F401
+
+            self.assertEqual(hermes_home(), str(get_hermes_home()))
+        except ImportError:
+            self.assertEqual(hermes_home(), expected)
 
 
 if __name__ == "__main__":

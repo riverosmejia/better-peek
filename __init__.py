@@ -35,19 +35,32 @@ def register(ctx) -> None:
 def _peek(raw_args: str = "", **context) -> str:
     """The answer a slash command prints. Never raises: a broken preview must not eat the session."""
     try:
-        return _answer((raw_args or "").strip(), context.get("session_id") or None)
+        return _answer(
+            (raw_args or "").strip(),
+            context.get("session_id") or None,
+            str(context.get("platform") or ""),
+        )
     except Exception:  # noqa: BLE001 - a plugin command reports, it does not crash the turn
         return "peek failed:\n" + traceback.format_exc(limit=2)
 
 
-def _answer(arg: str, session_id: str | None) -> str:
+# The platforms where a command's answer comes back to a person who is not the one at the keyboard:
+# there a free path would let any allowlisted chat read any file, so only the list is accepted.
+_CHAT_PLATFORMS = frozenset(
+    {"telegram", "discord", "slack", "whatsapp", "signal", "matrix", "imessage", "sms", "teams", "email"}
+)
+
+
+def _answer(arg: str, session_id: str | None, platform: str = "") -> str:
     text, cwd = peek_cli.last_message(session_id)
     base = cwd or os.getcwd()
     home = os.path.expanduser("~")
 
+    # No session, no answer: a fresh gateway chat must never fall back to someone else's message.
+    if not text:
+        return "no answer recorded yet in this session: /peek <path>"
+
     if not arg:
-        if not text:
-            return "no answer recorded yet in this session: /peek <path>"
         return peek_cli.listing(peek_cli.candidates(text, base, None, home))
 
     if arg.isdigit():
@@ -55,6 +68,9 @@ def _answer(arg: str, session_id: str | None) -> str:
         if not 1 <= int(arg) <= len(hits):
             return f"no path #{arg}: /peek lists them"
         return peek_cli.card(hits[int(arg) - 1])
+
+    if platform.casefold() in _CHAT_PLATFORMS:
+        return "on a chat, /peek takes only the number of a path from its list"
 
     found = peek_cli.candidates(arg, base, None, home, limit=1)
     if not found:

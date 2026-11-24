@@ -85,10 +85,19 @@ Sin él, `/peek` y el widget siguen funcionando (el clic es lo único que necesi
 
 - No abre ventanas ni aplicaciones gráficas: todo se dibuja en el terminal.
 - No toca ficheros: lee lo que el modelo nombró, si existe.
+- **No enseña secretos.** Un fichero con credenciales se rechaza antes de abrirlo — los mismos que
+  el lector de ficheros de Hermes: `.env*` (salvo `.env.example`), `auth.json`, `mcp-tokens/`,
+  `vault/`, `browser-profile/`, `.netrc`, `.npmrc`, `.ssh/`, `.aws/`, `~/.config/gh/hosts.yml`; por
+  ruta real, así un symlink con nombre inocente no la esquiva. Y todo lo que sale pasa por
+  `agent.redact.redact_sensitive_text(force=True)`.
+- **No lee la conversación de otra persona.** Sin `session_id` (un chat de gateway nuevo) responde
+  que no hay respuesta todavía; no cae al último mensaje de la base.
+- **En el gateway solo acepta el número de la lista**, nunca una ruta libre: ahí la respuesta vuelve
+  a un chat y cualquiera de la lista blanca podría pedir cualquier fichero.
 - Un `file://` escrito por el modelo no dispara nada: los enlaces de ruta usan un esquema propio
   (`hermes-peek://`) que solo fabrica el renderer, y la ruta tiene que existir en esta máquina.
-- Una ruta relativa se resuelve desde la carpeta del proceso del TUI, no desde la de la sesión
-  después de un `cd`.
+- Una ruta relativa se resuelve desde la carpeta de la sesión, o la del proceso si la sesión no la
+  tiene.
 
 ## Origen y licencia
 
