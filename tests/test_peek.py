@@ -237,6 +237,23 @@ class SafetyTest(unittest.TestCase):
         self.assertNotIn(token, redacted(f"token {token}"))
         self.assertEqual(redacted("const MAX_TOKENS = 4000"), "const MAX_TOKENS = 4000")
 
+    def test_without_the_core_it_redacts_anyway_not_fail_open(self):
+        # The widget runs this file as a standalone python3, where agent.redact may be out of reach.
+        from peek_cli import _redact_without_core
+
+        self.assertNotIn("ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+                         _redact_without_core("token ghp_1234567890abcdefghijklmnopqrstuvwxyz"))
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuvwx",
+                         _redact_without_core("OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx"))
+        self.assertNotIn("hunter2hunter2", _redact_without_core("DB_PASSWORD=hunter2hunter2"))
+        self.assertEqual(_redact_without_core("const MAX_TOKENS = 4000"), "const MAX_TOKENS = 4000")
+
+    def test_the_documented_shape_env_is_not_refused(self):
+        example = self.dir / ".env.example"
+        example.write_text("OPENAI_API_KEY=put-yours-here\n")
+        self.assertEqual(example.name, ".env.example")
+        self.assertIsNone(secret_refusal(str(example)))
+
     def test_no_session_id_reads_nothing(self):
         self.assertEqual(last_message(None), ("", None))
         self.assertEqual(last_message(""), ("", None))

@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -32,6 +33,22 @@ def hermes_home() -> str:
         return os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
 
 
+def _core_on_path() -> None:
+    """Put the Hermes source checkout on ``sys.path`` when it is a sibling of the profile home.
+
+    The widget calls this file as a standalone ``python3``, outside the Hermes process, where
+    ``agent`` is not importable; without this the core's redactor and file guard are out of reach.
+    """
+    home = os.path.dirname(hermes_home())  # ~/.hermes/profiles/<name> -> ~/.hermes/profiles
+    for candidate in (os.path.join(home, "..", "hermes-agent"), os.path.join(home, "hermes-agent")):
+        path = os.path.abspath(candidate)
+        if os.path.isfile(os.path.join(path, "agent", "redact.py")) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+_core_on_path()
+
+
 # Refused outside Hermes, where agent.file_safety is not importable: the same class of file the
 # core's read guard refuses, matched by name.
 _FALLBACK_SECRET_NAMES = {
@@ -46,6 +63,41 @@ _FALLBACK_SECRET_DIRS = (
 )
 
 
+def _fallback_is_secret_name(name: str) -> bool:
+    """``.env`` and every ``.env.<variant>``, except the documented-shape ``.env.example``."""
+    return name in _FALLBACK_SECRET_NAMES or (name.startswith(".env.") and name != ".env.example")
+
+
+# The redactor, for when `agent.redact` is not importable (the standalone call the widget makes):
+# a preview must never come back raw just because the core is out of reach.
+_FALLBACK_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\b(?:sk|rk)-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?im)^([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(\S+)\s*$"
+)
+
+
+def _redact_without_core(text: str) -> str:
+    """The common credential shapes, masked. Not the core's full rule set — a floor, not a copy."""
+    for pattern in _FALLBACK_PATTERNS:
+        text = pattern.sub("«redacted»", text)
+
+    def assignment(match: "re.Match[str]") -> str:
+        value = match.group(2)
+        if len(value) < 8 or value.isdigit() or value.startswith("«"):
+            return match.group(0)  # MAX_TOKENS=4000 and the like name a number, not a credential
+        return match.group(1) + "«redacted»"
+
+    return _SECRET_ASSIGNMENT.sub(assignment, text)
+
+
 def secret_refusal(path: str) -> str | None:
     """Why ``path`` must not be opened, or None.
 
@@ -58,7 +110,7 @@ def secret_refusal(path: str) -> str | None:
     except Exception:  # noqa: BLE001 - standalone: no Hermes to ask
         real = os.path.realpath(path)
         name = os.path.basename(real).casefold()
-        if name in _FALLBACK_SECRET_NAMES or name.startswith(".env.") or name.startswith(".env"):
+        if _fallback_is_secret_name(name):
             return f"{path} is a secret-bearing file, and /peek does not read it."
         home = os.path.realpath(os.path.expanduser("~"))
         for part in _FALLBACK_SECRET_DIRS:
@@ -77,13 +129,16 @@ def secret_refusal(path: str) -> str | None:
 
 
 def redacted(text: str) -> str:
-    """Every excerpt leaves through here: a plugin's output must never carry a raw secret."""
+    """Every excerpt leaves through here: a plugin's output must never carry a raw secret.
+
+    Fail-closed on purpose: with no ``agent.redact`` to call (the standalone widget path) the
+    local pattern floor applies instead of returning the text untouched.
+    """
     try:
         from agent.redact import redact_sensitive_text
-
-        return redact_sensitive_text(text, force=True)
-    except Exception:  # noqa: BLE001 - standalone: nothing to redact with, and nothing to trust
-        return text
+    except Exception:  # noqa: BLE001 - standalone: the core is out of reach, not optional
+        return _redact_without_core(text)
+    return redact_sensitive_text(text, force=True)
 
 
 def last_message(session_id: str | None = None) -> tuple[str, str | None]:
