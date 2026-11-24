@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "better-peek",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "The paths an answer names become real: /peek lists them and shows a file's lines, the TUI widget browses them, and clicking one opens the file inside the TUI.",
   "author": {
     "name": "riverosmejia",

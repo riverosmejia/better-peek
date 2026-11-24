@@ -254,6 +254,18 @@ class SafetyTest(unittest.TestCase):
         self.assertEqual(example.name, ".env.example")
         self.assertIsNone(secret_refusal(str(example)))
 
+    def test_the_store_check_survives_a_core_without_that_helper(self):
+        # resolved_home_credential_stores arrived in a later Hermes than get_read_block_error;
+        # missing it must not take the name and store floor down with it.
+        import agent.file_safety as file_safety
+        from unittest import mock
+
+        npmrc = pathlib.Path.home() / ".npmrc"
+        with mock.patch.object(file_safety, "resolved_home_credential_stores", None, create=True):
+            self.assertIsNotNone(secret_refusal(str(npmrc)))
+            self.assertIsNotNone(secret_refusal(str(pathlib.Path.home() / ".ssh/config")))
+            self.assertIsNone(secret_refusal(str(self.dir / "notes.md")))
+
     def test_no_session_id_reads_nothing(self):
         self.assertEqual(last_message(None), ("", None))
         self.assertEqual(last_message(""), ("", None))

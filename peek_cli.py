@@ -104,25 +104,38 @@ def secret_refusal(path: str) -> str | None:
     A preview is bytes leaving Hermes — on a gateway they reach a chat — so it obeys the
     same denylist the file tools do, plus the home credential stores (the reviewer's list). Realpath,
     so a symlink with an innocuous name does not get around it.
+
+    The core guard is one path and the name/store floor another, both always applied: the floor
+    catches what the read guard never blocked (``.npmrc``, ``.netrc``, ``~/.config/gh/hosts.yml``)
+    and keeps working on a Hermes old enough to lack ``resolved_home_credential_stores``.
     """
     try:
-        from agent.file_safety import get_read_block_error, resolved_home_credential_stores
+        from agent.file_safety import get_read_block_error
     except Exception:  # noqa: BLE001 - standalone: no Hermes to ask
-        real = os.path.realpath(path)
-        name = os.path.basename(real).casefold()
-        if _fallback_is_secret_name(name):
-            return f"{path} is a secret-bearing file, and /peek does not read it."
-        home = os.path.realpath(os.path.expanduser("~"))
-        for part in _FALLBACK_SECRET_DIRS:
-            store = os.path.join(home, part)
-            if real == store or real.startswith(store + os.sep):
-                return f"{path} is a credential store, and /peek does not read it."
-        return None
-    error = get_read_block_error(path)
-    if error:
+        return _name_or_store_refusal(path)
+    if get_read_block_error(path):
         return f"{path} is a secret-bearing or credential file, and /peek does not read it."
+    return _name_or_store_refusal(path)
+
+
+def _name_or_store_refusal(path: str) -> str | None:
     real = os.path.realpath(path)
-    files, dirs = resolved_home_credential_stores()
+    if _fallback_is_secret_name(os.path.basename(real).casefold()):
+        return f"{path} is a secret-bearing file, and /peek does not read it."
+    home = os.path.realpath(os.path.expanduser("~"))
+    for part in _FALLBACK_SECRET_DIRS:
+        store = os.path.join(home, part)
+        if real == store or real.startswith(store + os.sep):
+            return f"{path} is a credential store, and /peek does not read it."
+    try:
+        from agent import file_safety
+
+        stores_of = getattr(file_safety, "resolved_home_credential_stores", None)
+        if stores_of is None:
+            return None  # a core older than that helper: the two checks above stand
+        files, dirs = stores_of()
+    except Exception:  # noqa: BLE001 - import failed: the two checks above stand
+        return None
     if real in files or any(real == store or real.startswith(store + os.sep) for store in dirs):
         return f"{path} is a credential store, and /peek does not read it."
     return None
